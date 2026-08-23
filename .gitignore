@@ -1,0 +1,18 @@
+# Python generated files
+__pycache__/
+*.pyc
+
+# Python virtual environment
+venv/
+.venv/
+
+# Runtime logs
+logs/
+*.log
+*.jsonl
+
+# Generated SmartPanel snapshots
+snapshots/
+
+# Generated metrics
+metrics/
