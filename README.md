@@ -1,5 +1,14 @@
 # SmartPanel Snapshot
 
+> ## Copilot-Assisted Code
+>
+> This project was developed with the assistance of AI coding tools.
+>
+> It is not intended for production use. Instead, it is an experimental and educational project that illustrates what is possible today with API access, basic programming knowledge, curiosity, and AI assistance.
+>
+> The goal is to explore, learn, and demonstrate how these tools can help turn ideas into working prototypes.
+
+
 SmartPanel Snapshot is a Python-based utility for discovering, monitoring, saving, comparing, and restoring Riedel SmartPanel runtime states through the SmartPanel Live View WebSocket interface.
 
 The project is intended for operational monitoring, configuration drift detection, and recovery of SmartPanel key states.
@@ -12,7 +21,7 @@ The project is intended for operational monitoring, configuration drift detectio
 - Calculate configuration compliance
 - Restore missing or unexpected key states
 - Verify SmartPanel identity before restore
-- Optional NSA normalization
+- Experimental key normalization
 - REST API using FastAPI
 - Runtime network configuration through the API
 - JSON metrics generation
@@ -205,9 +214,9 @@ The restore process:
 7. Reads the panel again
 8. Verifies final compliance
 
-### NSA Normalization
+### Experimental Key Normalization
 
-Optional normalization can be performed before restore:
+Optional key normalization can be performed before restore:
 
 ```bash
 ./restore_all.sh --normalize
@@ -219,7 +228,19 @@ or:
 python restore.py snapshots/R3-1232.json --normalize
 ```
 
-**Warning:** NSA normalization currently uses layout-specific normalized touchscreen coordinates and should be validated before use with other panel layouts or firmware versions.
+Key normalization is an **experimental feature**.
+
+The implementation does not use a dedicated normalization API. Instead, it simulates touchscreen interactions through the SmartPanel Live View WebSocket interface.
+
+Important limitations:
+
+- Touchscreen coordinates are based on the currently tested SmartPanel layout.
+- Panel-type-specific behavior is not fully implemented or validated.
+- Simulated touchscreen interactions can occasionally be missed by the panel.
+- Normalization should therefore be considered best-effort rather than deterministic.
+- Other SmartPanel models, firmware versions, or display layouts may require different touchscreen coordinates.
+
+This feature demonstrates how existing API functionality can be combined creatively to automate an operation even when a dedicated API method is not available.
 
 ## REST API
 
