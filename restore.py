@@ -801,11 +801,11 @@ async def normalize_key(
         display_id,
         select_x,
         select_y,
-        hold_time=0.8,
+        hold_time=0.65,
     )
 
     await asyncio.sleep(
-        0.2
+        0.15
     )
 
     # Hit Normalize.
@@ -815,11 +815,11 @@ async def normalize_key(
         display_id,
         action_x,
         action_y,
-        hold_time=0.15,
+        hold_time=0.12,
     )
 
     await asyncio.sleep(
-        0.3
+        0.25
     )
 
 
