@@ -7,7 +7,7 @@ smartpanels:
   network: 10.85.226.64/26
 
   # Maximum number of addresses scanned concurrently.
-  scan_concurrency: 20
+  scan_concurrency: 50
 
   # Connection timeout in seconds.
   connect_timeout: 3
