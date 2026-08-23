@@ -1,8 +1,23 @@
 #!/bin/bash
 
-cd /home/utility/python/smartpanel3
+# SmartPanel Snapshot - Save All
+#
+# Wrapper used by the REST API and manual operation.
+#
+# The SmartPanel network and scan settings are loaded by save.py
+# from config.yaml.
 
-source /home/utility/python/smartpanel/venv/bin/activate
+set -u
 
-python save.py 10.85.226.96 panel1
-python save.py 10.85.226.72 panel2
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON="$PROJECT_DIR/.venv/bin/python"
+
+if [ ! -x "$PYTHON" ]; then
+    echo "ERROR: Python virtual environment not found:"
+    echo "$PYTHON"
+    exit 1
+fi
+
+"$PYTHON" "$PROJECT_DIR/save.py"
+
+exit $?

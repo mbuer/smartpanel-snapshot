@@ -1,0 +1,27 @@
+# SmartPanel Snapshot configuration
+#
+# Site-specific settings belong here rather than being hard-coded
+# throughout the application.
+
+smartpanels:
+  # IPv4 network used when discovering SmartPanels.
+  # Example: 10.85.226.64/26 scans usable hosts 10.85.226.65 - 10.85.226.126.
+  network: "10.85.226.64/26"
+
+  # Maximum number of addresses scanned concurrently.
+  scan_concurrency: 20
+
+  # Connection timeout in seconds.
+  connect_timeout: 3
+
+paths:
+  snapshots: "snapshots"
+  metrics: "metrics"
+
+logging:
+  # JSONL output consumed by Grafana Alloy.
+  alloy_log: "/var/log/smartpanel/panel-health.jsonl"
+
+api:
+  host: "0.0.0.0"
+  port: 8081

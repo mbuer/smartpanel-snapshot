@@ -9,21 +9,21 @@ as JSON snapshots.
 
 The script accepts either:
 
-    - A single IPv4 address
-    - An IPv4 network in CIDR notation
+    - No argument:
+        Uses the SmartPanel network defined in config.yaml.
 
-Examples:
+    - A single IPv4 address:
+        python save.py 10.85.226.96
 
-    python save.py 10.85.226.96
-    python save.py 10.85.226.80/28
+    - An IPv4 network in CIDR notation:
+        python save.py 10.85.226.64/26
 
 SmartPanels are identified through the Live View WebSocket interface.
+
 Addresses that are unreachable, do not expose the expected WebSocket
 interface, or do not respond within the configured timeout are skipped.
 
-Snapshots are written to:
-
-    snapshots/<SmartPanel-name>.json
+Snapshots are written to the directory configured in config.yaml.
 
 Example:
 
@@ -42,28 +42,40 @@ import sys
 
 import websockets
 
+from config import CONFIG
+
 
 # ---------------------------------------------------------------------------
-# Configuration
+# SmartPanel configuration
 # ---------------------------------------------------------------------------
 
 # SmartPanel panel ID used by the Live View API.
+#
 # Current implementation assumes the primary panel has ID 0.
 PANEL_ID = 0
 
-# Maximum time allowed to establish the WebSocket connection.
-CONNECT_TIMEOUT = 3
 
-# Maximum time allowed while waiting for a specific SmartPanel response.
-RESPONSE_TIMEOUT = 3
+# ---------------------------------------------------------------------------
+# Deployment configuration loaded from config.yaml
+# ---------------------------------------------------------------------------
 
-# Maximum number of SmartPanels/IP addresses queried simultaneously.
-# This prevents large CIDR scans from opening hundreds of connections
-# at the same time.
-MAX_CONCURRENT_CONNECTIONS = 20
+# Default network used when save.py is run without a command-line target.
+SMARTPANEL_NETWORK = CONFIG["smartpanels"]["network"]
+
+# Maximum time allowed to establish a WebSocket connection.
+CONNECT_TIMEOUT = CONFIG["smartpanels"]["connect_timeout"]
+
+# Maximum number of IP addresses queried simultaneously.
+MAX_CONCURRENT_CONNECTIONS = CONFIG["smartpanels"]["scan_concurrency"]
 
 # Directory where generated SmartPanel snapshots are stored.
-SNAPSHOT_DIR = "snapshots"
+SNAPSHOT_DIR = CONFIG["paths"]["snapshots"]
+
+# Maximum time allowed while waiting for a specific SmartPanel response.
+#
+# This remains an application-level setting for now rather than a
+# deployment-specific config.yaml value.
+RESPONSE_TIMEOUT = 3
 
 
 # ---------------------------------------------------------------------------
@@ -74,49 +86,73 @@ def expand_target(target):
     """
     Convert a command-line target into a list of IPv4 addresses.
 
-    The target may be either a single IPv4 address:
+    The target may be either:
 
         10.85.226.96
 
-    or a CIDR network:
+    or:
 
-        10.85.226.80/28
+        10.85.226.64/26
 
-    For CIDR networks, network and broadcast addresses are excluded.
+    For CIDR networks, the network and broadcast addresses are excluded.
 
     Args:
-        target: IP address or CIDR network supplied by the user.
+        target:
+            IPv4 address or IPv4 CIDR network.
 
     Returns:
-        List of IP addresses represented as strings.
+        List of IPv4 addresses represented as strings.
 
     Raises:
-        ValueError: If the supplied value is neither a valid IPv4
-                    address nor a valid IPv4 CIDR network.
+        ValueError:
+            Target is not a valid IPv4 address or IPv4 CIDR network.
     """
 
-    # First attempt to interpret the target as a single IP address.
+    # -----------------------------------------------------------------------
+    # First try interpreting the value as a single IPv4 address.
+    # -----------------------------------------------------------------------
+
     try:
-        address = ipaddress.ip_address(target)
+
+        address = ipaddress.ip_address(
+            target
+        )
 
         if address.version != 4:
-            raise ValueError("Only IPv4 addresses are currently supported.")
+            raise ValueError(
+                "Only IPv4 addresses are currently supported."
+            )
 
-        return [str(address)]
+        return [
+            str(address)
+        ]
 
     except ValueError:
         pass
 
-    # If it isn't a single address, try interpreting it as a network.
+    # -----------------------------------------------------------------------
+    # Otherwise try interpreting the value as an IPv4 network.
+    # -----------------------------------------------------------------------
+
     try:
-        network = ipaddress.ip_network(target, strict=False)
+
+        network = ipaddress.ip_network(
+            target,
+            strict=False,
+        )
 
         if network.version != 4:
-            raise ValueError("Only IPv4 networks are currently supported.")
+            raise ValueError(
+                "Only IPv4 networks are currently supported."
+            )
 
-        return [str(ip) for ip in network.hosts()]
+        return [
+            str(ip)
+            for ip in network.hosts()
+        ]
 
     except ValueError as exc:
+
         raise ValueError(
             f"Invalid IPv4 address or CIDR network: {target}"
         ) from exc
@@ -126,102 +162,151 @@ def expand_target(target):
 # WebSocket helpers
 # ---------------------------------------------------------------------------
 
-async def receive_topic(ws, expected_topic):
+async def receive_topic(
+    ws,
+    expected_topic,
+):
     """
-    Wait for a specific SmartPanel Live View response.
+    Wait for a specific SmartPanel Live View response topic.
 
-    SmartPanel Live View may send messages for several different topics.
-    This helper ignores unrelated messages until the requested response
-    arrives.
+    SmartPanel Live View may send messages for multiple topics.
+    Unrelated messages are ignored until the requested response arrives.
 
-    A timeout prevents the application from waiting indefinitely if the
-    target device is not a SmartPanel or does not provide the expected
-    response.
+    A timeout prevents the program from waiting indefinitely.
 
     Args:
-        ws: Active WebSocket connection.
-        expected_topic: Live View topic that should be returned.
+        ws:
+            Active WebSocket connection.
+
+        expected_topic:
+            Live View response topic expected from the SmartPanel.
 
     Returns:
-        Parsed JSON message containing the expected topic.
+        Parsed JSON response.
 
     Raises:
-        TimeoutError: If the expected response is not received in time.
-        json.JSONDecodeError: If the received message is invalid JSON.
+        TimeoutError:
+            Expected response was not received within RESPONSE_TIMEOUT.
     """
 
     while True:
+
         raw_message = await asyncio.wait_for(
             ws.recv(),
-            timeout=RESPONSE_TIMEOUT
+            timeout=RESPONSE_TIMEOUT,
         )
 
-        message = json.loads(raw_message)
+        # Binary messages are currently not required for snapshot saving.
+        if isinstance(
+            raw_message,
+            bytes,
+        ):
+            continue
 
-        if message.get("topic") == expected_topic:
+        try:
+
+            message = json.loads(
+                raw_message
+            )
+
+        except json.JSONDecodeError:
+            continue
+
+        if message.get(
+            "topic"
+        ) == expected_topic:
+
             return message
 
 
 def safe_filename(name):
     """
-    Convert a SmartPanel name into a filesystem-safe filename.
-
-    SmartPanel custom names may contain spaces or characters that are
-    undesirable in filenames.
+    Convert a SmartPanel custom name into a filesystem-safe filename.
 
     Example:
 
-        "Studio / Panel 1"
+        Studio / Panel 1
 
     becomes:
 
-        "Studio_-_Panel_1"
+        Studio_-_Panel_1
+
+    Args:
+        name:
+            SmartPanel customName.
+
+    Returns:
+        Filesystem-safe filename component.
     """
 
     name = name.strip()
 
     # Replace whitespace with underscores.
-    name = re.sub(r"\s+", "_", name)
+    name = re.sub(
+        r"\s+",
+        "_",
+        name,
+    )
 
     # Replace characters outside a conservative filename set.
-    name = re.sub(r"[^A-Za-z0-9._-]", "-", name)
+    name = re.sub(
+        r"[^A-Za-z0-9._-]",
+        "-",
+        name,
+    )
 
-    return name or "unnamed-panel"
+    return (
+        name
+        or "unnamed-panel"
+    )
 
 
 # ---------------------------------------------------------------------------
 # SmartPanel snapshot logic
 # ---------------------------------------------------------------------------
 
-async def save_panel(panel_ip, semaphore):
+async def save_panel(
+    panel_ip,
+    semaphore,
+):
     """
     Retrieve and save the current state of one SmartPanel.
 
-    The function performs three major steps:
+    The function:
 
-        1. Connect to /live-view using WebSocket.
-        2. Retrieve the SmartPanel name and current key state.
-        3. Save the resulting state as a JSON snapshot.
+        1. Connects to /live-view.
+        2. Retrieves SmartPanel information.
+        3. Retrieves the current key state.
+        4. Saves the resulting state as JSON.
 
-    Unreachable addresses and devices that do not behave like SmartPanels
-    are skipped instead of stopping the entire scan.
+    Unreachable addresses and devices that do not behave like compatible
+    SmartPanels are skipped instead of stopping the entire scan.
 
     Args:
-        panel_ip: IPv4 address of the potential SmartPanel.
-        semaphore: Asyncio semaphore controlling scan concurrency.
+        panel_ip:
+            IPv4 address of the potential SmartPanel.
+
+        semaphore:
+            Asyncio semaphore controlling scan concurrency.
 
     Returns:
         Snapshot dictionary when successful.
-        None when the address could not be processed as a SmartPanel.
+
+        None when the target could not be processed as a SmartPanel.
     """
 
-    uri = f"ws://{panel_ip}/live-view"
+    uri = (
+        f"ws://{panel_ip}/live-view"
+    )
 
-    # Limit the number of simultaneous network connections.
+    # Limit simultaneous network connections.
     async with semaphore:
 
         try:
-            print(f"[SCAN] {panel_ip}")
+
+            print(
+                f"[SCAN] {panel_ip}"
+            )
 
             # ---------------------------------------------------------------
             # Establish SmartPanel Live View WebSocket connection
@@ -229,71 +314,119 @@ async def save_panel(panel_ip, semaphore):
 
             async with websockets.connect(
                 uri,
-                open_timeout=CONNECT_TIMEOUT
+                open_timeout=CONNECT_TIMEOUT,
             ) as ws:
 
                 # -----------------------------------------------------------
                 # Fetch panel information
                 # -----------------------------------------------------------
 
-                await ws.send(json.dumps({
-                    "topic": "/LiveView/FetchPanelInfo",
-                    "body": {}
-                }))
+                await ws.send(
+                    json.dumps({
+                        "topic": "/LiveView/FetchPanelInfo",
+                        "body": {},
+                    })
+                )
 
                 info_message = await receive_topic(
                     ws,
-                    "/LiveView/FetchPanelInfoResponse"
+                    "/LiveView/FetchPanelInfoResponse",
                 )
 
-                panels = info_message["body"]["panels"]
+                panels = (
+                    info_message[
+                        "body"
+                    ][
+                        "panels"
+                    ]
+                )
 
                 if not panels:
-                    raise ValueError("Panel information response is empty.")
 
-                panel_name = panels[0]["customName"]
+                    raise ValueError(
+                        "Panel information response is empty."
+                    )
+
+                panel_name = (
+                    panels[0][
+                        "customName"
+                    ]
+                )
 
                 # -----------------------------------------------------------
                 # Fetch current panel state
                 # -----------------------------------------------------------
 
-                await ws.send(json.dumps({
-                    "topic": "/LiveView/FetchPanelState",
-                    "body": {
-                        "panelId": PANEL_ID
-                    }
-                }))
+                await ws.send(
+                    json.dumps({
+                        "topic": "/LiveView/FetchPanelState",
+                        "body": {
+                            "panelId": PANEL_ID,
+                        },
+                    })
+                )
 
                 state_message = await receive_topic(
                     ws,
-                    "/LiveView/FetchPanelStateResponse"
+                    "/LiveView/FetchPanelStateResponse",
                 )
 
                 listen_keys = []
                 call_keys = []
 
-                # leverKeysLedRing contains the current LED state of the
-                # SmartPanel lever keys.
+                # -----------------------------------------------------------
+                # Interpret lever key LED state
+                # -----------------------------------------------------------
                 #
-                # Current interpretation:
+                # Current Live View interpretation:
                 #
-                #   Upper LED green == 255
-                #       Key is currently in Listen state.
+                #   upperColor.green == 255
+                #       Listen is active.
                 #
-                #   Lower LED red == 255
-                #       Key is currently in Call/Talk state.
+                #   lowerColor.red == 255
+                #       Call/Talk is active.
                 #
-                for key in state_message["body"]["leverKeysLedRing"]:
+                # -----------------------------------------------------------
 
-                    key_id = key["keyId"]
+                for key in (
+                    state_message[
+                        "body"
+                    ][
+                        "leverKeysLedRing"
+                    ]
+                ):
 
-                    # Listen State
-                    if key["upperColor"]["green"] == 255:
-                        listen_keys.append(key_id)
+                    key_id = (
+                        key["keyId"]
+                    )
 
-                    # Call / Talk State
-                    if key["lowerColor"]["red"] == 255:
-                        call_keys.append(key_id)
+                    # Listen state
+                    if (
+                        key[
+                            "upperColor"
+                        ][
+                            "green"
+                        ]
+                        == 255
+                    ):
+
+                        listen_keys.append(
+                            key_id
+                        )
+
+                    # Call / Talk state
+                    if (
+                        key[
+                            "lowerColor"
+                        ][
+                            "red"
+                        ]
+                        == 255
+                    ):
+
+                        call_keys.append(
+                            key_id
+                        )
 
                 # -----------------------------------------------------------
                 # Build snapshot
@@ -303,34 +436,52 @@ async def save_panel(panel_ip, semaphore):
                     "panelName": panel_name,
                     "panelIp": panel_ip,
                     "panelId": PANEL_ID,
-                    "listenKeys": sorted(listen_keys),
-                    "callKeys": sorted(call_keys)
+                    "listenKeys": sorted(
+                        listen_keys
+                    ),
+                    "callKeys": sorted(
+                        call_keys
+                    ),
                 }
 
                 # Ensure the runtime snapshot directory exists.
-                os.makedirs(SNAPSHOT_DIR, exist_ok=True)
-
-		# NOTE:
-		# Snapshot filenames are based on the SmartPanel customName.
-		# SmartPanel names must therefore currently be unique.
-		# Duplicate names will result in snapshot file collisions.
-                filename = os.path.join(
+                os.makedirs(
                     SNAPSHOT_DIR,
-                    f"{safe_filename(panel_name)}.json"
+                    exist_ok=True,
                 )
 
-                with open(filename, "w", encoding="utf-8") as file:
-                    json.dump(snapshot, file, indent=2)
+                # NOTE:
+                # Snapshot filenames are based on the SmartPanel customName.
+                # SmartPanel names must therefore currently be unique.
+                # Duplicate names will result in snapshot file collisions.
+                filename = os.path.join(
+                    SNAPSHOT_DIR,
+                    f"{safe_filename(panel_name)}.json",
+                )
+
+                with open(
+                    filename,
+                    "w",
+                    encoding="utf-8",
+                ) as file:
+
+                    json.dump(
+                        snapshot,
+                        file,
+                        indent=2,
+                    )
 
                 print(
-                    f"[OK]   {panel_ip:<15} "
-                    f"{panel_name} -> {filename}"
+                    f"[OK]   "
+                    f"{panel_ip:<15} "
+                    f"{panel_name} "
+                    f"-> {filename}"
                 )
 
                 return snapshot
 
         # -------------------------------------------------------------------
-        # Expected network/device failures
+        # Expected network / device failures
         # -------------------------------------------------------------------
 
         except (
@@ -343,11 +494,12 @@ async def save_panel(panel_ip, semaphore):
             KeyError,
             IndexError,
             TypeError,
-            ValueError
+            ValueError,
         ) as exc:
 
             print(
-                f"[SKIP] {panel_ip:<15} "
+                f"[SKIP] "
+                f"{panel_ip:<15} "
                 f"No compatible SmartPanel response "
                 f"({type(exc).__name__})"
             )
@@ -363,56 +515,135 @@ async def main():
     """
     Command-line entry point.
 
-    Expands the supplied IP/CIDR target, scans all resulting addresses,
-    saves discovered SmartPanel states, and prints a summary.
+    When no argument is supplied, the SmartPanel network from config.yaml
+    is scanned.
+
+    A single IP address or CIDR network may also be supplied as a temporary
+    command-line override.
     """
 
-    if len(sys.argv) != 2:
+    # -----------------------------------------------------------------------
+    # Validate command-line arguments
+    # -----------------------------------------------------------------------
+
+    if len(sys.argv) > 2:
 
         print()
-        print("SmartPanel Snapshot - Save")
+        print(
+            "SmartPanel Snapshot - Save"
+        )
         print()
         print("Usage:")
-        print("  python save.py <panel-ip>")
-        print("  python save.py <CIDR-network>")
+        print(
+            "  python save.py"
+        )
+        print(
+            "  python save.py <panel-ip>"
+        )
+        print(
+            "  python save.py <CIDR-network>"
+        )
         print()
         print("Examples:")
-        print("  python save.py 10.85.226.96")
-        print("  python save.py 10.85.226.80/28")
+        print(
+            "  python save.py"
+        )
+        print(
+            "  python save.py 10.85.226.96"
+        )
+        print(
+            "  python save.py 10.85.226.64/26"
+        )
         print()
 
         return
 
     # -----------------------------------------------------------------------
-    # Parse target
+    # Determine target
+    # -----------------------------------------------------------------------
+
+    if len(sys.argv) == 2:
+
+        # Explicit command-line target overrides config.yaml.
+        target = sys.argv[1]
+
+        target_source = (
+            "command line"
+        )
+
+    else:
+
+        # No target supplied: use deployment configuration.
+        target = SMARTPANEL_NETWORK
+
+        target_source = (
+            "config.yaml"
+        )
+
+    # -----------------------------------------------------------------------
+    # Expand target into individual host addresses
     # -----------------------------------------------------------------------
 
     try:
-        targets = expand_target(sys.argv[1])
+
+        targets = expand_target(
+            target
+        )
 
     except ValueError as exc:
+
         print()
-        print(f"Error: {exc}")
+        print(
+            f"Error: {exc}"
+        )
         print()
+
         return
 
+    # -----------------------------------------------------------------------
+    # Scan summary
+    # -----------------------------------------------------------------------
+
     print()
-    print("SmartPanel Snapshot")
-    print("-------------------")
-    print(f"Target addresses: {len(targets)}")
+    print(
+        "SmartPanel Snapshot"
+    )
+    print(
+        "-------------------"
+    )
+    print(
+        f"Target          : {target}"
+    )
+    print(
+        f"Target source   : {target_source}"
+    )
+    print(
+        f"Target addresses: {len(targets)}"
+    )
+    print(
+        f"Concurrency     : {MAX_CONCURRENT_CONNECTIONS}"
+    )
     print()
 
-    # Semaphore prevents excessive simultaneous connections.
-    semaphore = asyncio.Semaphore(MAX_CONCURRENT_CONNECTIONS)
+    # -----------------------------------------------------------------------
+    # Run SmartPanel scans
+    # -----------------------------------------------------------------------
 
-    # Create one asynchronous task per target address.
+    semaphore = asyncio.Semaphore(
+        MAX_CONCURRENT_CONNECTIONS
+    )
+
     tasks = [
-        save_panel(panel_ip, semaphore)
+        save_panel(
+            panel_ip,
+            semaphore,
+        )
         for panel_ip in targets
     ]
 
-    # Run the scans concurrently.
-    results = await asyncio.gather(*tasks)
+    results = await asyncio.gather(
+        *tasks
+    )
 
     # Count successful SmartPanel snapshots.
     successful = [
@@ -422,17 +653,29 @@ async def main():
     ]
 
     # -----------------------------------------------------------------------
-    # Summary
+    # Final summary
     # -----------------------------------------------------------------------
 
     print()
-    print("-------------------")
-    print(f"Addresses scanned : {len(targets)}")
-    print(f"SmartPanels found : {len(successful)}")
-    print(f"Addresses skipped : {len(targets) - len(successful)}")
+    print(
+        "-------------------"
+    )
+    print(
+        f"Addresses scanned : {len(targets)}"
+    )
+    print(
+        f"SmartPanels found : {len(successful)}"
+    )
+    print(
+        f"Addresses skipped : "
+        f"{len(targets) - len(successful)}"
+    )
     print()
 
 
-# Standard Python entry point.
+# ---------------------------------------------------------------------------
+# Standard Python entry point
+# ---------------------------------------------------------------------------
+
 if __name__ == "__main__":
     asyncio.run(main())
