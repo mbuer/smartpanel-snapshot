@@ -11,26 +11,23 @@ PANEL_ID = 0
 
 async def main():
 
-    if len(sys.argv) != 3:
+    if len(sys.argv) != 2:
         print("")
         print("Usage:")
-        print("python save.py <panel-ip> <snapshot-name>")
+        print("python save.py <panel-ip>")
         print("")
         print("Example:")
-        print("python save.py 10.85.226.96 panel1")
+        print("python save.py 10.85.226.96")
         print("")
         return
 
     panel_ip = sys.argv[1]
-    snapshot_name = sys.argv[2]
-
-    filename = f"snapshots/{snapshot_name}.json"
 
     uri = f"ws://{panel_ip}/live-view"
 
     print(f"Connecting to {uri}")
 
-    async with websockets.connect(uri) as ws:
+    async with websockets.connect(uri, open_timeout=3) as ws:
 
         #
         # Get panel information
@@ -49,7 +46,8 @@ async def main():
             if msg.get("topic") == "/LiveView/FetchPanelInfoResponse":
 
                 panel_name = msg["body"]["panels"][0]["customName"]
-
+                filename = f"snapshots/{panel_name}.json"
+	
                 break
 
         #
