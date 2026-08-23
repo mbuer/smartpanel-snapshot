@@ -1,119 +1,60 @@
 #!/bin/bash
 
-# SmartPanel Snapshot - Restore All
-#
-# Restores every SmartPanel snapshot found in the local snapshots directory.
-#
-# Optional:
-#
-#   ./restore_all.sh --normalize
-#
-# The --normalize option is passed to restore.py for every panel.
-#
-# IMPORTANT:
-# Restore actively changes SmartPanel state.
-
-set -u
-
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PYTHON="$PROJECT_DIR/.venv/bin/python"
-SNAPSHOT_DIR="$PROJECT_DIR/snapshots"
+set -e
 
 NORMALIZE=""
 
-if [[ "${1:-}" == "--normalize" ]]; then
+if [[ "$1" == "--normalize" ]]; then
     NORMALIZE="--normalize"
 fi
 
-
-# ---------------------------------------------------------------------------
-# Validation
-# ---------------------------------------------------------------------------
-
-if [ ! -x "$PYTHON" ]; then
-    echo "ERROR: Python virtual environment not found:"
-    echo "$PYTHON"
-    exit 1
-fi
-
-if [ ! -d "$SNAPSHOT_DIR" ]; then
-    echo "ERROR: Snapshot directory not found:"
-    echo "$SNAPSHOT_DIR"
-    exit 1
-fi
-
-
-# ---------------------------------------------------------------------------
-# Find snapshots
-# ---------------------------------------------------------------------------
-
-shopt -s nullglob
-
-snapshots=("$SNAPSHOT_DIR"/*.json)
-
-if [ ${#snapshots[@]} -eq 0 ]; then
-    echo "No SmartPanel snapshots found."
-    exit 0
-fi
-
-echo "Restoring ${#snapshots[@]} SmartPanel snapshot(s)..."
-
-if [ -n "$NORMALIZE" ]; then
-    echo "NSA normalization: ENABLED"
-else
-    echo "NSA normalization: disabled"
-fi
+cd "$(dirname "$0")"
 
 echo
+echo "Restoring SmartPanels in parallel..."
+echo "Normalization: ${NORMALIZE:-disabled}"
+echo
 
+pids=()
+names=()
 
-# ---------------------------------------------------------------------------
-# Restore panels
-# ---------------------------------------------------------------------------
-#
-# Restore is intentionally sequential for now.
-#
-# Unlike compare/check operations, restore actively modifies panel state.
-# Sequential execution makes the process easier to follow, troubleshoot,
-# and stop if an unexpected condition is encountered.
-#
+for snapshot in snapshots/*.json; do
+    [[ -e "$snapshot" ]] || continue
+
+    name=$(basename "$snapshot" .json)
+
+    echo "[START] $name"
+
+    python restore.py "$snapshot" $NORMALIZE \
+        > "logs/restore-${name}.log" 2>&1 &
+
+    pids+=("$!")
+    names+=("$name")
+done
+
+echo
+echo "Waiting for restores..."
+echo
 
 failed=0
 
-for snapshot in "${snapshots[@]}"; do
+for i in "${!pids[@]}"; do
+    pid="${pids[$i]}"
+    name="${names[$i]}"
 
-    echo "=================================================="
-    echo "[RESTORE] $(basename "$snapshot")"
-    echo "=================================================="
-
-    if [ -n "$NORMALIZE" ]; then
-
-        if ! "$PYTHON" "$PROJECT_DIR/restore.py" "$snapshot" --normalize; then
-            failed=$((failed + 1))
-        fi
-
+    if wait "$pid"; then
+        echo "[OK]   $name"
     else
-
-        if ! "$PYTHON" "$PROJECT_DIR/restore.py" "$snapshot"; then
-            failed=$((failed + 1))
-        fi
-
+        echo "[FAIL] $name"
+        failed=1
     fi
-
-    echo
-
 done
 
+echo
 
-# ---------------------------------------------------------------------------
-# Final summary
-# ---------------------------------------------------------------------------
-
-echo "Restore-all complete."
-
-if [ "$failed" -gt 0 ]; then
-    echo "WARNING: $failed restore operation(s) failed."
+if [[ "$failed" -eq 0 ]]; then
+    echo "Restore-all complete."
+else
+    echo "Restore-all completed with failures."
     exit 1
 fi
-
-exit 0
