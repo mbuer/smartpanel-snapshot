@@ -1,51 +1,28 @@
 #!/usr/bin/env python3
 
 """
-SmartPanel Snapshot - Restore Utility
+SmartPanel Snapshot - Dynamic Restore Utility
 
-Restores the Listen and Call/Talk key state of a Riedel SmartPanel from
-a previously saved SmartPanel Snapshot JSON file.
+Restores Listen and Call/Talk state from a saved SmartPanel snapshot.
 
-The restore process:
+Optional key normalization:
 
-    1. Loads and validates the snapshot.
-    2. Connects to the SmartPanel stored in the snapshot.
-    3. Verifies the connected panel identity.
-    4. Reads the current key state.
-    5. Calculates configuration drift.
-    6. Removes unwanted Listen/Call states.
-    7. Restores missing Listen/Call states.
-    8. Reads the panel again and verifies the final state.
+    python restore_dynamic.py snapshots/R3-1232.json --normalize
 
-Example:
+Dynamic normalization currently supports:
 
-    python restore.py snapshots/R3-1232.json
+    RSP-1232:
+        2 displays
+        16 key positions per display
+        32 total positions
 
-Optional NSA normalization:
-
-    python restore.py snapshots/R3-1232.json --normalize
-
-Compliance model:
-
-    Compliance percentage represents how many expected key states are
-    currently correct.
-
-    Status is strict:
-
-        COMPLIANT
-            No missing or extra Listen/Call states exist.
-
-        NON-COMPLIANT
-            At least one missing or extra state exists.
+    1216-family panels:
+        Assumed to use the same 16-key geometry on displayId 0.
+        This has not yet been validated on an online 1216 panel.
 
 IMPORTANT:
-    Restore actively changes SmartPanel key states through the Live View
-    WebSocket API.
-
-    The --normalize option additionally simulates touchscreen operations
-    using normalized display coordinates. These coordinates are specific
-    to the currently tested SmartPanel layout and should be reviewed before
-    use with different layouts, firmware versions, or products.
+    Restore and normalization actively manipulate SmartPanel state through
+    the Live View WebSocket API.
 """
 
 import argparse
@@ -60,84 +37,82 @@ from config import CONFIG
 
 
 # ---------------------------------------------------------------------------
-# Configuration loaded from config.yaml
+# Configuration
 # ---------------------------------------------------------------------------
 
-# Maximum time allowed to establish the WebSocket connection.
 CONNECT_TIMEOUT = CONFIG["smartpanels"]["connect_timeout"]
-
-# Maximum time allowed while waiting for a SmartPanel response.
 RESPONSE_TIMEOUT = CONFIG["smartpanels"]["response_timeout"]
 
-
-# ---------------------------------------------------------------------------
-# Restore behavior
-# ---------------------------------------------------------------------------
-#
-# These values describe application behavior rather than deployment-specific
-# settings, so they intentionally remain in the Python code.
-#
-
-# Delay after optional NSA normalization before reading panel state.
 NORMALIZE_SETTLE_TIME = 3
 
-# Timing used when simulating lever operations.
 LEVER_HOLD_TIME = 0.1
 LEVER_SETTLE_TIME = 0.2
 
 
 # ---------------------------------------------------------------------------
-# NSA normalization coordinates
+# Dynamic key-normalization geometry
 # ---------------------------------------------------------------------------
 #
-# These coordinates were determined for the currently tested SmartPanel
-# Live View layout.
+# Each SmartPanel display contains:
 #
-# Each entry contains:
+#     8 columns x 2 rows = 16 physical key positions
 #
-#   select:
-#       Coordinates used to open the NSA key menu.
+# Coordinates were measured from an RSP-1232 Live View session.
 #
-#   action:
-#       Coordinates used to select the normalization action.
+# The key drawer behaves as follows:
 #
-# IMPORTANT:
-# These values are UI/layout dependent. They are NOT a generic SmartPanel
-# protocol definition.
+#     columns 0-3 -> drawer opens to the right
+#     columns 4-7 -> drawer opens to the left
 #
 
-NORMALIZE_KEYS = [
-    {
-        "name": "NSA02-01",
-        "select": (0.07758268397878876, 0.252314066134677),
-        "action": (0.18610231308186967, 0.29316955261836136),
+DISPLAY_GEOMETRY = {
+    0: {
+        "top": {
+            "left": (0.0652228897, 0.2665194764),
+            "right": (0.9393297502, 0.2463333859),
+        },
+        "bottom": {
+            "left": (0.0591527031, 0.7610786942),
+            "right": (0.9352829592, 0.7610786942),
+        },
     },
-    {
-        "name": "NSA02-02",
-        "select": (0.1840548029741338, 0.23188643978109633),
-        "action": (0.3417155182239178, 0.252314066134677),
+
+    1: {
+        "top": {
+            "left": (0.0646221941, 0.2665194764),
+            "right": (0.9346822637, 0.2463333859),
+        },
+        "bottom": {
+            "left": (0.0605754031, 0.7711717395),
+            "right": (0.9346822637, 0.7913578300),
+        },
     },
-    {
-        "name": "NSA02-03",
-        "select": (0.30281217007390343, 0.18081725700888315),
-        "action": (0.4338548790071024, 0.19103095329741202),
-    },
-    {
-        "name": "NSA02-04",
-        "select": (0.4481877309482676, 0.22167250971604452),
-        "action": (0.597658124580094, 0.252314066134677),
-    },
-    {
-        "name": "NSA02-05",
-        "select": (0.5669450043190325, 0.24210036984614816),
-        "action": (0.31509741817832804, 0.26252799619972883),
-    },
-    {
-        "name": "NSA02-06",
-        "select": (0.6938926930367597, 0.252314066134677),
-        "action": (0.43999750305931473, 0.22167250971604452),
-    },
-]
+}
+
+
+# Exact measured Normalize-action positions for corner keys.
+#
+# For all other positions the neighboring-key center is used as an
+# approximation.
+#
+# Key:
+#
+#     (display_id, row, column): (x, y)
+#
+NORMALIZE_ACTION_OVERRIDES = {
+    # Display 0
+    (0, 0, 0): (0.1866266203, 0.2564264312),
+    (0, 0, 7): (0.8078090420, 0.2362403406),
+    (0, 1, 0): (0.1866266203, 0.7207065132),
+    (0, 1, 1): (0.3141005375, 0.7509856490),
+    (0, 1, 7): (0.8078090420, 0.7711717395),
+
+    # Display 1
+    (1, 0, 0): (0.1880493203, 0.2564264312),
+    (1, 0, 7): (0.8051849510, 0.2766125217),
+    (1, 1, 0): (0.1880493203, 0.7812647847),
+    (1, 1, 7): (0.8173253241, 0.7913578300),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -146,15 +121,7 @@ NORMALIZE_KEYS = [
 
 def load_snapshot(snapshot_path):
     """
-    Load and validate a SmartPanel snapshot file.
-
-    Required fields:
-
-        panelName
-        panelIp
-        panelId
-        listenKeys
-        callKeys
+    Load and validate one SmartPanel snapshot.
     """
 
     path = Path(snapshot_path)
@@ -186,7 +153,9 @@ def load_snapshot(snapshot_path):
     if missing_fields:
         raise ValueError(
             "Snapshot is missing required field(s): "
-            + ", ".join(sorted(missing_fields))
+            + ", ".join(
+                sorted(missing_fields)
+            )
         )
 
     if not isinstance(
@@ -233,10 +202,9 @@ async def receive_topic(
     expected_topic,
 ):
     """
-    Wait for a specific SmartPanel Live View response topic.
+    Wait for a specific Live View JSON response.
 
-    Unrelated, binary, or malformed messages are ignored.
-    A configured timeout prevents indefinite waiting.
+    Binary display frames and unrelated messages are ignored.
     """
 
     while True:
@@ -246,24 +214,30 @@ async def receive_topic(
             timeout=RESPONSE_TIMEOUT,
         )
 
-        if isinstance(raw, bytes):
+        if isinstance(
+            raw,
+            bytes,
+        ):
             continue
 
         try:
-            message = json.loads(raw)
+            message = json.loads(
+                raw
+            )
 
         except json.JSONDecodeError:
             continue
 
-        if message.get(
-            "topic"
-        ) == expected_topic:
+        if (
+            message.get("topic")
+            == expected_topic
+        ):
             return message
 
 
-async def get_panel_name(ws):
+async def get_panel_info(ws):
     """
-    Retrieve the SmartPanel custom name through Live View.
+    Return SmartPanel identity information.
     """
 
     await ws.send(
@@ -278,19 +252,35 @@ async def get_panel_name(ws):
         "/LiveView/FetchPanelInfoResponse",
     )
 
-    panels = message[
-        "body"
-    ][
-        "panels"
-    ]
+    panels = (
+        message
+        ["body"]
+        ["panels"]
+    )
 
     if not panels:
         raise ValueError(
-            "SmartPanel returned an empty "
-            "panel information response."
+            "SmartPanel returned an empty panel information response."
         )
 
-    return panels[0]["customName"]
+    panel = panels[0]
+
+    return {
+        "panelName": panel.get(
+            "customName"
+        ),
+        "panelType": panel.get(
+            "panelType",
+            "",
+        ),
+        "firmwareVersion": panel.get(
+            "firmwareVersion",
+            "",
+        ),
+        "panelId": panel.get(
+            "panelId"
+        ),
+    }
 
 
 async def get_current_state(
@@ -298,15 +288,15 @@ async def get_current_state(
     panel_id,
 ):
     """
-    Retrieve the current Listen and Call/Talk state.
+    Read current Listen and Call/Talk state.
 
-    Current Live View interpretation:
+    Current interpretation:
 
         upperColor.green == 255
-            Listen is active.
+            Listen active
 
         lowerColor.red == 255
-            Call/Talk is active.
+            Call/Talk active
     """
 
     await ws.send(
@@ -326,13 +316,13 @@ async def get_current_state(
     listen_keys = []
     call_keys = []
 
-    for key in (
-        message[
-            "body"
-        ][
-            "leverKeysLedRing"
-        ]
-    ):
+    keys = (
+        message
+        ["body"]
+        ["leverKeysLedRing"]
+    )
+
+    for key in keys:
 
         key_id = key["keyId"]
 
@@ -363,7 +353,7 @@ async def get_current_state(
 
 
 # ---------------------------------------------------------------------------
-# Drift and compliance calculation
+# Drift / compliance
 # ---------------------------------------------------------------------------
 
 def calculate_drift(
@@ -374,11 +364,6 @@ def calculate_drift(
 ):
     """
     Compare desired snapshot state with current SmartPanel state.
-
-    Compliance percentage measures how many expected states are correct.
-
-    Strict compliant status requires an exact match with no missing or
-    unexpected states.
     """
 
     desired_listen = set(
@@ -424,32 +409,27 @@ def calculate_drift(
 
     if expected_total == 0:
 
-        if (
-            current_listen
+        compliance = (
+            0.0
+            if current_listen
             or current_call
-        ):
-            compliance = 0.0
-
-        else:
-            compliance = 100.0
+            else 100.0
+        )
 
     else:
 
-        correct_listen = len(
-            desired_listen.intersection(
-                current_listen
-            )
-        )
-
-        correct_call = len(
-            desired_call.intersection(
-                current_call
-            )
-        )
-
         correct_total = (
-            correct_listen
-            + correct_call
+            len(
+                desired_listen.intersection(
+                    current_listen
+                )
+            )
+            +
+            len(
+                desired_call.intersection(
+                    current_call
+                )
+            )
         )
 
         compliance = round(
@@ -478,7 +458,7 @@ def calculate_drift(
 
 
 # ---------------------------------------------------------------------------
-# SmartPanel control operations
+# Listen / Call control
 # ---------------------------------------------------------------------------
 
 async def toggle_listen_key(
@@ -487,10 +467,7 @@ async def toggle_listen_key(
     key_id,
 ):
     """
-    Toggle a SmartPanel Listen state.
-
-    Listen is controlled by simulating an upward lever movement followed
-    by release.
+    Toggle Listen by simulating an upward lever movement.
     """
 
     await ws.send(
@@ -530,10 +507,7 @@ async def toggle_call_key(
     key_id,
 ):
     """
-    Toggle a SmartPanel Call/Talk state.
-
-    Call/Talk is controlled by simulating a downward lever movement
-    followed by release.
+    Toggle Call/Talk by simulating a downward lever movement.
     """
 
     await ws.send(
@@ -568,20 +542,192 @@ async def toggle_call_key(
 
 
 # ---------------------------------------------------------------------------
-# NSA normalization
+# Dynamic key normalization
 # ---------------------------------------------------------------------------
+
+def interpolate_position(
+    left,
+    right,
+    column,
+):
+    """
+    Calculate one key position in an eight-column row.
+    """
+
+    if not 0 <= column <= 7:
+        raise ValueError(
+            f"Invalid column: {column}"
+        )
+
+    fraction = (
+        column / 7
+    )
+
+    x = (
+        left[0]
+        + (
+            right[0]
+            - left[0]
+        )
+        * fraction
+    )
+
+    y = (
+        left[1]
+        + (
+            right[1]
+            - left[1]
+        )
+        * fraction
+    )
+
+    return x, y
+
+
+def get_key_position(
+    display_id,
+    row,
+    column,
+):
+    """
+    Calculate the touchscreen center of one physical key.
+    """
+
+    if (
+        display_id
+        not in DISPLAY_GEOMETRY
+    ):
+        raise ValueError(
+            f"Unsupported display ID: {display_id}"
+        )
+
+    if row not in (
+        0,
+        1,
+    ):
+        raise ValueError(
+            f"Invalid row: {row}"
+        )
+
+    row_name = (
+        "top"
+        if row == 0
+        else "bottom"
+    )
+
+    geometry = (
+        DISPLAY_GEOMETRY
+        [display_id]
+        [row_name]
+    )
+
+    return interpolate_position(
+        geometry["left"],
+        geometry["right"],
+        column,
+    )
+
+
+def get_normalize_position(
+    display_id,
+    row,
+    column,
+):
+    """
+    Determine the Normalize-action position.
+
+    Exact captured coordinates are used for the four corners of each
+    display. Other keys use the neighboring key center.
+
+    Columns 0-3:
+        drawer opens right
+
+    Columns 4-7:
+        drawer opens left
+    """
+
+    override = (
+        NORMALIZE_ACTION_OVERRIDES
+        .get(
+            (
+                display_id,
+                row,
+                column,
+            )
+        )
+    )
+
+    if override is not None:
+        return override
+
+    if column < 4:
+        action_column = (
+            column + 1
+        )
+
+    else:
+        action_column = (
+            column - 1
+        )
+
+    return get_key_position(
+        display_id,
+        row,
+        action_column,
+    )
+
+
+def get_normalization_displays(
+    panel_type,
+):
+    """
+    Determine how many displays should be normalized.
+
+    1232:
+        display 0 + display 1
+
+    1216:
+        display 0 only
+
+    Unknown panel types are rejected rather than guessed.
+    """
+
+    panel_type_upper = (
+        panel_type.upper()
+    )
+
+    if "1232" in panel_type_upper:
+        return (
+            0,
+            1,
+        )
+
+    if "1216" in panel_type_upper:
+        print(
+            "WARNING: 1216 key-normalization geometry "
+            "has not yet been validated."
+        )
+
+        return (
+            0,
+        )
+
+    raise RuntimeError(
+        "Dynamic key normalization is not defined "
+        f"for panel type '{panel_type}'."
+    )
+
 
 async def touch(
     ws,
     panel_id,
+    display_id,
     x,
     y,
     hold_time=0.25,
 ):
     """
     Simulate one touchscreen press and release.
-
-    Coordinates use the normalized Live View display coordinate system.
     """
 
     await ws.send(
@@ -589,7 +735,7 @@ async def touch(
             "topic": "/LiveView/SimulateTouch",
             "body": {
                 "panelId": panel_id,
-                "displayId": 1,
+                "displayId": display_id,
                 "x": x,
                 "y": y,
                 "touchState": "Pressed",
@@ -606,7 +752,7 @@ async def touch(
             "topic": "/LiveView/SimulateTouch",
             "body": {
                 "panelId": panel_id,
-                "displayId": 1,
+                "displayId": display_id,
                 "x": x,
                 "y": y,
                 "touchState": "Released",
@@ -615,60 +761,139 @@ async def touch(
     )
 
 
+async def normalize_key(
+    ws,
+    panel_id,
+    display_id,
+    row,
+    column,
+):
+    """
+    Normalize one physical key position.
+    """
+
+    select_x, select_y = (
+        get_key_position(
+            display_id,
+            row,
+            column,
+        )
+    )
+
+    action_x, action_y = (
+        get_normalize_position(
+            display_id,
+            row,
+            column,
+        )
+    )
+
+    print(
+        f"[Display {display_id} "
+        f"Row {row} "
+        f"Column {column}]"
+    )
+
+    # Open the key drawer.
+    await touch(
+        ws,
+        panel_id,
+        display_id,
+        select_x,
+        select_y,
+        hold_time=0.8,
+    )
+
+    await asyncio.sleep(
+        0.2
+    )
+
+    # Hit Normalize.
+    await touch(
+        ws,
+        panel_id,
+        display_id,
+        action_x,
+        action_y,
+        hold_time=0.15,
+    )
+
+    await asyncio.sleep(
+        0.3
+    )
+
+
+
+async def drain_liveview(ws):
+    """
+    Continuously consume unsolicited Live View traffic.
+
+    Touch operations generate binary display frames. If these frames are
+    not consumed, the WebSocket receive queue may eventually fill and
+    stall further communication.
+    """
+
+    try:
+        while True:
+            await ws.recv()
+
+    except asyncio.CancelledError:
+        pass
+
+
 async def normalize_all(
     ws,
     panel_id,
+    panel_type,
 ):
     """
-    Normalize all currently configured NSA keys.
+    EXPERIMENTAL key normalization.
 
-    WARNING:
-        This function relies on the layout-dependent coordinates in
-        NORMALIZE_KEYS.
+    Limitations:
+        - Simulates Live View touchscreen operations.
+        - Does not use a dedicated normalization API.
+        - Panel-type behavior is not fully validated.
     """
 
-    print()
-    print("Normalizing NSA keys...")
-    print()
-
-    for key in NORMALIZE_KEYS:
-
-        print(
-            f"[{key['name']}] Opening menu"
-        )
-
-        await touch(
-            ws,
-            panel_id,
-            key["select"][0],
-            key["select"][1],
-            hold_time=0.8,
-        )
-
-        await asyncio.sleep(
-            0.2
-        )
-
-        print(
-            f"[{key['name']}] Normalize"
-        )
-
-        await touch(
-            ws,
-            panel_id,
-            key["action"][0],
-            key["action"][1],
-            hold_time=0.15,
-        )
-
-        await asyncio.sleep(
-            0.3
-        )
-
-    print()
-    print(
-        "Normalization complete"
+    displays = get_normalization_displays(
+        panel_type
     )
+
+    print()
+    print("EXPERIMENTAL KEY NORMALIZATION")
+    print("--------------------------------")
+    print("Simulating Live View touchscreen operations.")
+    print("Panel-type behavior is not fully validated.")
+    print()
+
+    drain_task = asyncio.create_task(
+        drain_liveview(ws)
+    )
+
+    try:
+        for display_id in displays:
+            for row in (0, 1):
+                for column in range(8):
+
+                    await normalize_key(
+                        ws,
+                        panel_id,
+                        display_id,
+                        row,
+                        column,
+                    )
+
+    finally:
+        drain_task.cancel()
+
+        try:
+            await drain_task
+
+        except asyncio.CancelledError:
+            pass
+
+    print()
+    print("Normalization complete")
 
 
 # ---------------------------------------------------------------------------
@@ -680,7 +905,7 @@ def print_drift_report(
     title="Drift Analysis",
 ):
     """
-    Print a human-readable drift and compliance report.
+    Print a human-readable drift report.
     """
 
     print()
@@ -725,7 +950,7 @@ def print_drift_report(
 
 
 # ---------------------------------------------------------------------------
-# Restore process
+# Restore
 # ---------------------------------------------------------------------------
 
 async def restore_snapshot(
@@ -733,9 +958,7 @@ async def restore_snapshot(
     normalize=False,
 ):
     """
-    Restore one SmartPanel from a validated snapshot.
-
-    The connected panel identity is verified before any modification.
+    Restore one SmartPanel from a snapshot.
     """
 
     panel_name = snapshot[
@@ -789,12 +1012,20 @@ async def restore_snapshot(
         open_timeout=CONNECT_TIMEOUT,
     ) as ws:
 
-        # -------------------------------------------------------------------
-        # Safety check: verify panel identity before changing anything.
-        # -------------------------------------------------------------------
+        # ---------------------------------------------------------------
+        # Verify panel identity
+        # ---------------------------------------------------------------
+
+        panel_info = (
+            await get_panel_info(ws)
+        )
 
         connected_name = (
-            await get_panel_name(ws)
+            panel_info["panelName"]
+        )
+
+        panel_type = (
+            panel_info["panelType"]
         )
 
         print(
@@ -802,11 +1033,15 @@ async def restore_snapshot(
             f"{connected_name}"
         )
 
+        print(
+            f"Panel type          : "
+            f"{panel_type}"
+        )
+
         if (
             connected_name
             != panel_name
         ):
-
             raise RuntimeError(
                 "SmartPanel identity mismatch. "
                 f"Snapshot expects '{panel_name}', "
@@ -818,15 +1053,16 @@ async def restore_snapshot(
             "Panel identity verified."
         )
 
-        # -------------------------------------------------------------------
-        # Optional NSA normalization
-        # -------------------------------------------------------------------
+        # ---------------------------------------------------------------
+        # Optional key normalization
+        # ---------------------------------------------------------------
 
         if normalize:
 
             await normalize_all(
                 ws,
                 panel_id,
+                panel_type,
             )
 
             print()
@@ -838,11 +1074,13 @@ async def restore_snapshot(
                 NORMALIZE_SETTLE_TIME
             )
 
-        # -------------------------------------------------------------------
+        # ---------------------------------------------------------------
         # Read current state
-        # -------------------------------------------------------------------
+        # ---------------------------------------------------------------
 
-        start = time.monotonic()
+        start = (
+            time.monotonic()
+        )
 
         current = await get_current_state(
             ws,
@@ -860,10 +1098,6 @@ async def restore_snapshot(
             f"{elapsed:.2f}s"
         )
 
-        # -------------------------------------------------------------------
-        # Initial drift
-        # -------------------------------------------------------------------
-
         drift = calculate_drift(
             desired_listen,
             desired_call,
@@ -880,9 +1114,9 @@ async def restore_snapshot(
         added_listen = 0
         added_call = 0
 
-        # -------------------------------------------------------------------
-        # Remove unexpected states
-        # -------------------------------------------------------------------
+        # ---------------------------------------------------------------
+        # Remove unexpected state
+        # ---------------------------------------------------------------
 
         for key in drift[
             "extra_listen"
@@ -916,9 +1150,9 @@ async def restore_snapshot(
 
             removed_call += 1
 
-        # -------------------------------------------------------------------
-        # Restore missing states
-        # -------------------------------------------------------------------
+        # ---------------------------------------------------------------
+        # Restore missing state
+        # ---------------------------------------------------------------
 
         for key in drift[
             "missing_listen"
@@ -952,9 +1186,9 @@ async def restore_snapshot(
 
             added_call += 1
 
-        # -------------------------------------------------------------------
-        # Verify resulting state
-        # -------------------------------------------------------------------
+        # ---------------------------------------------------------------
+        # Verify
+        # ---------------------------------------------------------------
 
         print()
         print(
@@ -965,10 +1199,6 @@ async def restore_snapshot(
             ws,
             panel_id,
         )
-
-    # -----------------------------------------------------------------------
-    # Final compliance
-    # -----------------------------------------------------------------------
 
     final_drift = calculate_drift(
         desired_listen,
@@ -985,12 +1215,15 @@ async def restore_snapshot(
     print(
         f"Removed Listen : {removed_listen}"
     )
+
     print(
         f"Removed Call   : {removed_call}"
     )
+
     print(
         f"Added Listen   : {added_listen}"
     )
+
     print(
         f"Added Call     : {added_call}"
     )
@@ -1022,14 +1255,17 @@ async def restore_snapshot(
         f"Missing Listen : "
         f"{final_drift['missing_listen']}"
     )
+
     print(
         f"Extra Listen   : "
         f"{final_drift['extra_listen']}"
     )
+
     print(
         f"Missing Call   : "
         f"{final_drift['missing_call']}"
     )
+
     print(
         f"Extra Call     : "
         f"{final_drift['extra_call']}"
@@ -1040,10 +1276,14 @@ async def restore_snapshot(
     if final_drift[
         "compliant"
     ]:
-        print("SUCCESS ✅")
+        print(
+            "SUCCESS ✅"
+        )
 
     else:
-        print("WARNING ⚠️")
+        print(
+            "WARNING ⚠️"
+        )
 
     print(
         "===================================="
@@ -1053,13 +1293,10 @@ async def restore_snapshot(
 
 
 # ---------------------------------------------------------------------------
-# Command-line entry point
+# CLI
 # ---------------------------------------------------------------------------
 
 async def main():
-    """
-    Parse command-line arguments and execute the restore operation.
-    """
 
     parser = argparse.ArgumentParser(
         description=(
@@ -1079,14 +1316,15 @@ async def main():
         "--normalize",
         action="store_true",
         help=(
-            "Normalize configured NSA keys before "
+            "Normalize SmartPanel keys before "
             "restoring the snapshot."
         ),
     )
 
-    args = parser.parse_args()
+    args = (
+        parser.parse_args()
+    )
 
-    # Load and validate before making any network connection.
     try:
 
         snapshot = load_snapshot(
@@ -1107,7 +1345,6 @@ async def main():
 
         return
 
-    # Perform restore with controlled error handling.
     try:
 
         await restore_snapshot(
