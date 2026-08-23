@@ -432,7 +432,14 @@ async def restore():
 
 @app.post(
     "/restore-normalize",
-    summary="Normalize and restore SmartPanels",
+    summary="⚠ EXPERIMENTAL — Normalize and restore SmartPanels",
+    description=(
+        "⚠️ **EXPERIMENTAL FEATURE**\n\n"
+        "Key normalization uses simulated touchscreen interactions and may "
+        "occasionally miss individual keys. It is intended for testing and "
+        "demonstration purposes and is not recommended for operational use.\n\n"
+        "The restore operation actively changes SmartPanel state."
+    ),
 )
 async def restore_normalize():
     """
