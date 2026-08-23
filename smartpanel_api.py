@@ -3,7 +3,8 @@
 """
 SmartPanel Snapshot - REST API
 
-Provides an HTTP API for operating the SmartPanel Snapshot application.
+Provides an HTTP API for operating and configuring the SmartPanel Snapshot
+application.
 
 Current capabilities:
 
@@ -16,8 +17,15 @@ Current capabilities:
     GET  /status
         Return the latest generated SmartPanel metrics.
 
+    GET  /config
+        Return the current SmartPanel Snapshot configuration.
+
+    PUT  /config/network
+        Update the SmartPanel discovery network.
+
     POST /save
-        Save snapshots for all configured/discovered SmartPanels.
+        Save snapshots for all SmartPanels discovered in the configured
+        network.
 
     POST /check
         Compare all saved SmartPanels against their current state.
@@ -28,54 +36,60 @@ Current capabilities:
     POST /restore-normalize
         Normalize configured NSA keys before restoring all snapshots.
 
-The API acts as an orchestration layer around the existing SmartPanel
-Snapshot scripts.
-
-FastAPI automatically provides interactive API documentation at:
+FastAPI automatically provides interactive documentation at:
 
     /docs
 
-and the generated OpenAPI schema at:
-
-    /openapi.json
-
-Example:
-
-    uvicorn smartpanel_api:app --host 0.0.0.0 --port 8081
-
 SECURITY NOTE:
     Restore operations actively modify SmartPanel state.
+
+    Configuration endpoints also modify application behavior.
 
     Authentication and authorization should be added before exposing this
     service beyond a trusted internal network.
 """
 
 import asyncio
+import ipaddress
 import json
-from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+from config import (
+    CONFIG,
+    PROJECT_DIR,
+    load_config,
+    save_config,
+)
 
 
 # ---------------------------------------------------------------------------
-# Application configuration
+# Configuration
 # ---------------------------------------------------------------------------
 
 APP_NAME = "SmartPanel Snapshot API"
-APP_VERSION = "1.1.0"
+APP_VERSION = CONFIG["api"]["version"]
 
-# Resolve paths relative to this Python file rather than the shell's
-# current working directory.
-#
-# This makes the API more reliable when started through systemd,
-# Docker, another shell location, or a future deployment mechanism.
-PROJECT_DIR = Path(__file__).resolve().parent
+METRICS_DIR = (
+    PROJECT_DIR
+    / CONFIG["paths"]["metrics"]
+)
 
-METRICS_DIR = PROJECT_DIR / "metrics"
+SAVE_SCRIPT = (
+    PROJECT_DIR
+    / "save_all.sh"
+)
 
-SAVE_SCRIPT = PROJECT_DIR / "save_all.sh"
-CHECK_SCRIPT = PROJECT_DIR / "check_all.sh"
-RESTORE_SCRIPT = PROJECT_DIR / "restore_all.sh"
+CHECK_SCRIPT = (
+    PROJECT_DIR
+    / "check_all.sh"
+)
+
+RESTORE_SCRIPT = (
+    PROJECT_DIR
+    / "restore_all.sh"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -87,9 +101,27 @@ app = FastAPI(
     version=APP_VERSION,
     description=(
         "REST API for saving, comparing, restoring, "
-        "and monitoring Riedel SmartPanel snapshots."
+        "configuring, and monitoring Riedel SmartPanel snapshots."
     ),
 )
+
+
+# ---------------------------------------------------------------------------
+# API request models
+# ---------------------------------------------------------------------------
+
+class NetworkConfigUpdate(BaseModel):
+    """
+    Request body used to update the SmartPanel discovery network.
+
+    Example:
+
+        {
+            "network": "10.85.226.64/26"
+        }
+    """
+
+    network: str
 
 
 # ---------------------------------------------------------------------------
@@ -99,25 +131,6 @@ app = FastAPI(
 async def run_command(command):
     """
     Execute a SmartPanel Snapshot command asynchronously.
-
-    Using asyncio subprocesses prevents a long-running SmartPanel operation
-    from blocking the FastAPI server itself.
-
-    Args:
-        command:
-            List containing executable and command-line arguments.
-
-    Returns:
-        Dictionary containing command result information.
-
-    Example result:
-
-        {
-            "success": True,
-            "returncode": 0,
-            "stdout": "...",
-            "stderr": ""
-        }
     """
 
     try:
@@ -132,8 +145,12 @@ async def run_command(command):
         stdout, stderr = await process.communicate()
 
         return {
-            "success": process.returncode == 0,
-            "returncode": process.returncode,
+            "success": (
+                process.returncode == 0
+            ),
+            "returncode": (
+                process.returncode
+            ),
             "stdout": stdout.decode(
                 errors="replace"
             ),
@@ -147,8 +164,8 @@ async def run_command(command):
         raise HTTPException(
             status_code=500,
             detail=(
-                "Required SmartPanel Snapshot command "
-                f"could not be found: {exc}"
+                "Required SmartPanel Snapshot "
+                f"command could not be found: {exc}"
             ),
         ) from exc
 
@@ -157,8 +174,8 @@ async def run_command(command):
         raise HTTPException(
             status_code=500,
             detail=(
-                "Failed to execute SmartPanel Snapshot "
-                f"command: {exc}"
+                "Failed to execute SmartPanel "
+                f"Snapshot command: {exc}"
             ),
         ) from exc
 
@@ -173,8 +190,10 @@ async def run_command(command):
 )
 async def root():
     """
-    Return basic information about the SmartPanel Snapshot API.
+    Return basic service information.
     """
+
+    current_config = load_config()
 
     return {
         "service": APP_NAME,
@@ -182,6 +201,12 @@ async def root():
         "documentation": "/docs",
         "health": "/health",
         "status": "/status",
+        "config": "/config",
+        "network": current_config[
+            "smartpanels"
+        ][
+            "network"
+        ],
     }
 
 
@@ -192,14 +217,164 @@ async def root():
 async def health():
     """
     Confirm that the FastAPI service itself is running.
-
-    This does not verify SmartPanel connectivity.
     """
 
     return {
         "status": "healthy",
         "service": APP_NAME,
         "version": APP_VERSION,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Runtime configuration
+# ---------------------------------------------------------------------------
+
+@app.get(
+    "/config",
+    summary="Return application configuration",
+)
+async def get_config():
+    """
+    Return the current configuration directly from config.yaml.
+
+    The file is reloaded for every request so this endpoint always reflects
+    the current on-disk configuration.
+    """
+
+    try:
+
+        return load_config()
+
+    except (
+        FileNotFoundError,
+        ValueError,
+    ) as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        ) from exc
+
+
+@app.put(
+    "/config/network",
+    summary="Update SmartPanel discovery network",
+)
+async def update_network(
+    update: NetworkConfigUpdate,
+):
+    """
+    Update the IPv4 CIDR network used for SmartPanel discovery.
+
+    Example request:
+
+        {
+            "network": "10.85.226.64/26"
+        }
+
+    The supplied value is validated before config.yaml is modified.
+    """
+
+    # -----------------------------------------------------------------------
+    # Validate CIDR
+    # -----------------------------------------------------------------------
+
+    try:
+
+        network = ipaddress.ip_network(
+            update.network,
+            strict=False,
+        )
+
+    except ValueError as exc:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid IP network or CIDR notation."
+            ),
+        ) from exc
+
+    if network.version != 4:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Only IPv4 networks are currently supported."
+            ),
+        )
+
+    # Normalize the supplied network.
+    #
+    # Example:
+    #
+    #   10.85.226.70/26
+    #
+    # becomes:
+    #
+    #   10.85.226.64/26
+    #
+    normalized_network = str(
+        network
+    )
+
+    # -----------------------------------------------------------------------
+    # Load current configuration
+    # -----------------------------------------------------------------------
+
+    try:
+
+        config = load_config()
+
+    except (
+        FileNotFoundError,
+        ValueError,
+    ) as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        ) from exc
+
+    previous_network = config[
+        "smartpanels"
+    ][
+        "network"
+    ]
+
+    # -----------------------------------------------------------------------
+    # Update and save
+    # -----------------------------------------------------------------------
+
+    config[
+        "smartpanels"
+    ][
+        "network"
+    ] = normalized_network
+
+    try:
+
+        save_config(
+            config
+        )
+
+    except OSError as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Could not write config.yaml: {exc}"
+            ),
+        ) from exc
+
+    return {
+        "success": True,
+        "previousNetwork": previous_network,
+        "network": normalized_network,
+        "message": (
+            "SmartPanel discovery network updated."
+        ),
     }
 
 
@@ -213,7 +388,10 @@ async def health():
 )
 async def save():
     """
-    Execute the configured save-all operation.
+    Scan the configured SmartPanel network and save discovered panels.
+
+    save.py reloads config.yaml when the subprocess starts, so network
+    changes made through PUT /config/network automatically apply here.
     """
 
     return await run_command([
@@ -227,7 +405,7 @@ async def save():
 )
 async def check():
     """
-    Compare saved SmartPanel snapshots against current panel state.
+    Compare all existing snapshots against their live SmartPanels.
     """
 
     return await run_command([
@@ -241,7 +419,7 @@ async def check():
 )
 async def restore():
     """
-    Restore SmartPanels to their saved snapshot state.
+    Restore all SmartPanels to their saved snapshot state.
 
     WARNING:
         This endpoint actively changes SmartPanel state.
@@ -258,11 +436,10 @@ async def restore():
 )
 async def restore_normalize():
     """
-    Normalize configured NSA keys and restore SmartPanel snapshots.
+    Normalize configured NSA keys and restore all SmartPanels.
 
     WARNING:
-        This endpoint actively changes SmartPanel state and uses
-        layout-dependent touchscreen coordinates.
+        This endpoint actively changes SmartPanel state.
     """
 
     return await run_command([
@@ -282,13 +459,6 @@ async def restore_normalize():
 async def status():
     """
     Return the latest comparison metrics for all SmartPanels.
-
-    Metrics are read from:
-
-        metrics/*.json
-
-    Invalid or unreadable metric files are reported separately rather
-    than causing the entire endpoint to fail.
     """
 
     panels = []
@@ -323,8 +493,12 @@ async def status():
         ) as exc:
 
             errors.append({
-                "file": metrics_file.name,
-                "error": str(exc),
+                "file": (
+                    metrics_file.name
+                ),
+                "error": (
+                    str(exc)
+                ),
             })
 
     return {
@@ -332,3 +506,7 @@ async def status():
         "panels": panels,
         "errors": errors,
     }
+
+
+if __name__ == "__main__":
+    pass

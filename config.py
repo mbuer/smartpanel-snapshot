@@ -2,13 +2,6 @@
 
 """
 Shared configuration loader for SmartPanel Snapshot.
-
-Loads project settings from config.yaml and provides them to the
-application modules from one central location.
-
-The configuration file is resolved relative to this source file so
-the project can be cloned or moved without relying on the shell's
-current working directory.
 """
 
 from pathlib import Path
@@ -16,29 +9,13 @@ from pathlib import Path
 import yaml
 
 
-# Project root directory.
 PROJECT_DIR = Path(__file__).resolve().parent
-
-# Main YAML configuration file.
 CONFIG_FILE = PROJECT_DIR / "config.yaml"
 
 
 def load_config():
     """
     Load and validate config.yaml.
-
-    Returns:
-        Dictionary containing the parsed configuration.
-
-    Raises:
-        FileNotFoundError:
-            config.yaml does not exist.
-
-        ValueError:
-            Configuration is empty or missing required sections.
-
-        yaml.YAMLError:
-            YAML syntax is invalid.
     """
 
     if not CONFIG_FILE.is_file():
@@ -77,5 +54,21 @@ def load_config():
     return config
 
 
-# Load configuration once when this module is imported.
+def save_config(config):
+    """
+    Write configuration back to config.yaml.
+    """
+
+    with CONFIG_FILE.open(
+        "w",
+        encoding="utf-8",
+    ) as file:
+        yaml.safe_dump(
+            config,
+            file,
+            sort_keys=False,
+        )
+
+
+# Initial configuration used by modules that load settings at startup.
 CONFIG = load_config()

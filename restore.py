@@ -30,7 +30,7 @@ Compliance model:
     Compliance percentage represents how many expected key states are
     currently correct.
 
-    Status is stricter:
+    Status is strict:
 
         COMPLIANT
             No missing or extra Listen/Call states exist.
@@ -38,23 +38,14 @@ Compliance model:
         NON-COMPLIANT
             At least one missing or extra state exists.
 
-    Example:
-
-        Expected Listen : [6, 16, 18]
-        Current Listen  : [6, 16, 17, 20]
-
-        Correct expected states : 2 of 3
-        Compliance              : 66.7%
-        Status                  : NON-COMPLIANT
-
 IMPORTANT:
     Restore actively changes SmartPanel key states through the Live View
     WebSocket API.
 
     The --normalize option additionally simulates touchscreen operations
-    using hard-coded normalized display coordinates. These coordinates are
-    specific to the currently tested SmartPanel layout and should be reviewed
-    before use with different layouts, firmware versions, or products.
+    using normalized display coordinates. These coordinates are specific
+    to the currently tested SmartPanel layout and should be reviewed before
+    use with different layouts, firmware versions, or products.
 """
 
 import argparse
@@ -65,16 +56,27 @@ from pathlib import Path
 
 import websockets
 
+from config import CONFIG
+
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Configuration loaded from config.yaml
 # ---------------------------------------------------------------------------
 
 # Maximum time allowed to establish the WebSocket connection.
-CONNECT_TIMEOUT = 3
+CONNECT_TIMEOUT = CONFIG["smartpanels"]["connect_timeout"]
 
 # Maximum time allowed while waiting for a SmartPanel response.
-RESPONSE_TIMEOUT = 3
+RESPONSE_TIMEOUT = CONFIG["smartpanels"]["response_timeout"]
+
+
+# ---------------------------------------------------------------------------
+# Restore behavior
+# ---------------------------------------------------------------------------
+#
+# These values describe application behavior rather than deployment-specific
+# settings, so they intentionally remain in the Python code.
+#
 
 # Delay after optional NSA normalization before reading panel state.
 NORMALIZE_SETTLE_TIME = 3
@@ -146,30 +148,13 @@ def load_snapshot(snapshot_path):
     """
     Load and validate a SmartPanel snapshot file.
 
-    Required snapshot fields:
+    Required fields:
 
         panelName
         panelIp
         panelId
         listenKeys
         callKeys
-
-    Args:
-        snapshot_path:
-            Path to the JSON snapshot file.
-
-    Returns:
-        Validated snapshot dictionary.
-
-    Raises:
-        FileNotFoundError:
-            Snapshot does not exist.
-
-        ValueError:
-            Snapshot structure is invalid.
-
-        json.JSONDecodeError:
-            Snapshot does not contain valid JSON.
     """
 
     path = Path(snapshot_path)
@@ -179,7 +164,10 @@ def load_snapshot(snapshot_path):
             f"Snapshot file not found: {snapshot_path}"
         )
 
-    with path.open("r", encoding="utf-8") as file:
+    with path.open(
+        "r",
+        encoding="utf-8",
+    ) as file:
         snapshot = json.load(file)
 
     required_fields = {
@@ -190,7 +178,10 @@ def load_snapshot(snapshot_path):
         "callKeys",
     }
 
-    missing_fields = required_fields - snapshot.keys()
+    missing_fields = (
+        required_fields
+        - snapshot.keys()
+    )
 
     if missing_fields:
         raise ValueError(
@@ -198,11 +189,21 @@ def load_snapshot(snapshot_path):
             + ", ".join(sorted(missing_fields))
         )
 
-    if not isinstance(snapshot["listenKeys"], list):
-        raise ValueError("listenKeys must be a list.")
+    if not isinstance(
+        snapshot["listenKeys"],
+        list,
+    ):
+        raise ValueError(
+            "listenKeys must be a list."
+        )
 
-    if not isinstance(snapshot["callKeys"], list):
-        raise ValueError("callKeys must be a list.")
+    if not isinstance(
+        snapshot["callKeys"],
+        list,
+    ):
+        raise ValueError(
+            "callKeys must be a list."
+        )
 
     if not all(
         isinstance(key, int)
@@ -227,28 +228,15 @@ def load_snapshot(snapshot_path):
 # WebSocket helpers
 # ---------------------------------------------------------------------------
 
-async def receive_topic(ws, expected_topic):
+async def receive_topic(
+    ws,
+    expected_topic,
+):
     """
     Wait for a specific SmartPanel Live View response topic.
 
-    SmartPanel Live View may send unrelated messages while a request is
-    being processed. Those messages are ignored.
-
-    A timeout prevents the restore process from waiting indefinitely.
-
-    Args:
-        ws:
-            Active WebSocket connection.
-
-        expected_topic:
-            Live View topic expected from the SmartPanel.
-
-    Returns:
-        Parsed JSON response.
-
-    Raises:
-        TimeoutError:
-            Expected response was not received in time.
+    Unrelated, binary, or malformed messages are ignored.
+    A configured timeout prevents indefinite waiting.
     """
 
     while True:
@@ -258,8 +246,6 @@ async def receive_topic(ws, expected_topic):
             timeout=RESPONSE_TIMEOUT,
         )
 
-        # Some Live View messages may arrive as binary data.
-        # Restore currently processes only JSON text messages.
         if isinstance(raw, bytes):
             continue
 
@@ -269,69 +255,68 @@ async def receive_topic(ws, expected_topic):
         except json.JSONDecodeError:
             continue
 
-        if message.get("topic") == expected_topic:
+        if message.get(
+            "topic"
+        ) == expected_topic:
             return message
 
 
 async def get_panel_name(ws):
     """
     Retrieve the SmartPanel custom name through Live View.
-
-    Returns:
-        SmartPanel customName string.
     """
 
-    await ws.send(json.dumps({
-        "topic": "/LiveView/FetchPanelInfo",
-        "body": {}
-    }))
+    await ws.send(
+        json.dumps({
+            "topic": "/LiveView/FetchPanelInfo",
+            "body": {},
+        })
+    )
 
     message = await receive_topic(
         ws,
         "/LiveView/FetchPanelInfoResponse",
     )
 
-    panels = message["body"]["panels"]
+    panels = message[
+        "body"
+    ][
+        "panels"
+    ]
 
     if not panels:
         raise ValueError(
-            "SmartPanel returned an empty panel information response."
+            "SmartPanel returned an empty "
+            "panel information response."
         )
 
     return panels[0]["customName"]
 
 
-async def get_current_state(ws, panel_id):
+async def get_current_state(
+    ws,
+    panel_id,
+):
     """
     Retrieve the current Listen and Call/Talk state.
 
-    Live View represents the key state through LED-ring color values.
-
-    Current interpretation:
+    Current Live View interpretation:
 
         upperColor.green == 255
             Listen is active.
 
         lowerColor.red == 255
             Call/Talk is active.
-
-    Args:
-        ws:
-            Active SmartPanel WebSocket connection.
-
-        panel_id:
-            SmartPanel panel ID stored in the snapshot.
-
-    Returns:
-        Dictionary containing sorted listenKeys and callKeys lists.
     """
 
-    await ws.send(json.dumps({
-        "topic": "/LiveView/FetchPanelState",
-        "body": {
-            "panelId": panel_id
-        }
-    }))
+    await ws.send(
+        json.dumps({
+            "topic": "/LiveView/FetchPanelState",
+            "body": {
+                "panelId": panel_id,
+            },
+        })
+    )
 
     message = await receive_topic(
         ws,
@@ -341,19 +326,39 @@ async def get_current_state(ws, panel_id):
     listen_keys = []
     call_keys = []
 
-    for key in message["body"]["leverKeysLedRing"]:
+    for key in (
+        message[
+            "body"
+        ][
+            "leverKeysLedRing"
+        ]
+    ):
 
         key_id = key["keyId"]
 
-        if key["upperColor"]["green"] == 255:
-            listen_keys.append(key_id)
+        if (
+            key["upperColor"]["green"]
+            == 255
+        ):
+            listen_keys.append(
+                key_id
+            )
 
-        if key["lowerColor"]["red"] == 255:
-            call_keys.append(key_id)
+        if (
+            key["lowerColor"]["red"]
+            == 255
+        ):
+            call_keys.append(
+                key_id
+            )
 
     return {
-        "listenKeys": sorted(listen_keys),
-        "callKeys": sorted(call_keys),
+        "listenKeys": sorted(
+            listen_keys
+        ),
+        "callKeys": sorted(
+            call_keys
+        ),
     }
 
 
@@ -370,77 +375,47 @@ def calculate_drift(
     """
     Compare desired snapshot state with current SmartPanel state.
 
-    Returns:
+    Compliance percentage measures how many expected states are correct.
 
-        missing_listen
-            Listen keys required by the snapshot but currently inactive.
-
-        extra_listen
-            Listen keys currently active but absent from the snapshot.
-
-        missing_call
-            Call/Talk keys required by the snapshot but currently inactive.
-
-        extra_call
-            Call/Talk keys currently active but absent from the snapshot.
-
-        compliance
-            Percentage of expected states currently correct.
-
-        compliant
-            Boolean indicating whether the current state exactly matches
-            the snapshot.
-
-    Compliance and compliance status intentionally represent two different
-    concepts.
-
-    Compliance percentage:
-        Measures how many expected key states are currently correct.
-
-    Compliant status:
-        Requires an exact configuration match with no missing or extra
-        Listen/Call states.
-
-    Example:
-
-        Expected Listen : [6, 16, 18]
-        Current Listen  : [6, 16, 17, 20]
-
-        2 of 3 expected states are correct.
-
-        compliance = 66.7
-        compliant  = False
+    Strict compliant status requires an exact match with no missing or
+    unexpected states.
     """
 
-    desired_listen = set(desired_listen)
-    desired_call = set(desired_call)
+    desired_listen = set(
+        desired_listen
+    )
 
-    current_listen = set(current_listen)
-    current_call = set(current_call)
+    desired_call = set(
+        desired_call
+    )
 
-    # -----------------------------------------------------------------------
-    # Determine configuration drift
-    # -----------------------------------------------------------------------
+    current_listen = set(
+        current_listen
+    )
+
+    current_call = set(
+        current_call
+    )
 
     missing_listen = sorted(
-        desired_listen - current_listen
+        desired_listen
+        - current_listen
     )
 
     extra_listen = sorted(
-        current_listen - desired_listen
+        current_listen
+        - desired_listen
     )
 
     missing_call = sorted(
-        desired_call - current_call
+        desired_call
+        - current_call
     )
 
     extra_call = sorted(
-        current_call - desired_call
+        current_call
+        - desired_call
     )
-
-    # -----------------------------------------------------------------------
-    # Calculate compliance percentage
-    # -----------------------------------------------------------------------
 
     expected_total = (
         len(desired_listen)
@@ -449,10 +424,12 @@ def calculate_drift(
 
     if expected_total == 0:
 
-        # An empty desired state is 100% correct only if there are also
-        # no unexpected active states.
-        if current_listen or current_call:
+        if (
+            current_listen
+            or current_call
+        ):
             compliance = 0.0
+
         else:
             compliance = 100.0
 
@@ -476,16 +453,12 @@ def calculate_drift(
         )
 
         compliance = round(
-            (correct_total / expected_total) * 100,
+            (
+                correct_total
+                / expected_total
+            ) * 100,
             1,
         )
-
-    # -----------------------------------------------------------------------
-    # Strict compliance state
-    # -----------------------------------------------------------------------
-    #
-    # A panel is only considered fully compliant if there is no drift.
-    #
 
     compliant = not any([
         missing_listen,
@@ -520,27 +493,31 @@ async def toggle_listen_key(
     by release.
     """
 
-    await ws.send(json.dumps({
-        "topic": "/LiveView/SimulateLever",
-        "body": {
-            "panelId": panel_id,
-            "keyId": key_id,
-            "leverState": "Up"
-        }
-    }))
+    await ws.send(
+        json.dumps({
+            "topic": "/LiveView/SimulateLever",
+            "body": {
+                "panelId": panel_id,
+                "keyId": key_id,
+                "leverState": "Up",
+            },
+        })
+    )
 
     await asyncio.sleep(
         LEVER_HOLD_TIME
     )
 
-    await ws.send(json.dumps({
-        "topic": "/LiveView/SimulateLever",
-        "body": {
-            "panelId": panel_id,
-            "keyId": key_id,
-            "leverState": "Released"
-        }
-    }))
+    await ws.send(
+        json.dumps({
+            "topic": "/LiveView/SimulateLever",
+            "body": {
+                "panelId": panel_id,
+                "keyId": key_id,
+                "leverState": "Released",
+            },
+        })
+    )
 
     await asyncio.sleep(
         LEVER_SETTLE_TIME
@@ -559,27 +536,31 @@ async def toggle_call_key(
     followed by release.
     """
 
-    await ws.send(json.dumps({
-        "topic": "/LiveView/SimulateLever",
-        "body": {
-            "panelId": panel_id,
-            "keyId": key_id,
-            "leverState": "Down"
-        }
-    }))
+    await ws.send(
+        json.dumps({
+            "topic": "/LiveView/SimulateLever",
+            "body": {
+                "panelId": panel_id,
+                "keyId": key_id,
+                "leverState": "Down",
+            },
+        })
+    )
 
     await asyncio.sleep(
         LEVER_HOLD_TIME
     )
 
-    await ws.send(json.dumps({
-        "topic": "/LiveView/SimulateLever",
-        "body": {
-            "panelId": panel_id,
-            "keyId": key_id,
-            "leverState": "Released"
-        }
-    }))
+    await ws.send(
+        json.dumps({
+            "topic": "/LiveView/SimulateLever",
+            "body": {
+                "panelId": panel_id,
+                "keyId": key_id,
+                "leverState": "Released",
+            },
+        })
+    )
 
     await asyncio.sleep(
         LEVER_SETTLE_TIME
@@ -603,31 +584,35 @@ async def touch(
     Coordinates use the normalized Live View display coordinate system.
     """
 
-    await ws.send(json.dumps({
-        "topic": "/LiveView/SimulateTouch",
-        "body": {
-            "panelId": panel_id,
-            "displayId": 1,
-            "x": x,
-            "y": y,
-            "touchState": "Pressed"
-        }
-    }))
+    await ws.send(
+        json.dumps({
+            "topic": "/LiveView/SimulateTouch",
+            "body": {
+                "panelId": panel_id,
+                "displayId": 1,
+                "x": x,
+                "y": y,
+                "touchState": "Pressed",
+            },
+        })
+    )
 
     await asyncio.sleep(
         hold_time
     )
 
-    await ws.send(json.dumps({
-        "topic": "/LiveView/SimulateTouch",
-        "body": {
-            "panelId": panel_id,
-            "displayId": 1,
-            "x": x,
-            "y": y,
-            "touchState": "Released"
-        }
-    }))
+    await ws.send(
+        json.dumps({
+            "topic": "/LiveView/SimulateTouch",
+            "body": {
+                "panelId": panel_id,
+                "displayId": 1,
+                "x": x,
+                "y": y,
+                "touchState": "Released",
+            },
+        })
+    )
 
 
 async def normalize_all(
@@ -635,11 +620,11 @@ async def normalize_all(
     panel_id,
 ):
     """
-    Normalize the configured NSA keys.
+    Normalize all currently configured NSA keys.
 
     WARNING:
-        This function relies on hard-coded UI coordinates defined in
-        NORMALIZE_KEYS. It should be considered layout-dependent.
+        This function relies on the layout-dependent coordinates in
+        NORMALIZE_KEYS.
     """
 
     print()
@@ -681,7 +666,9 @@ async def normalize_all(
         )
 
     print()
-    print("Normalization complete")
+    print(
+        "Normalization complete"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -693,7 +680,7 @@ def print_drift_report(
     title="Drift Analysis",
 ):
     """
-    Print human-readable drift, compliance score, and compliance status.
+    Print a human-readable drift and compliance report.
     """
 
     print()
@@ -748,24 +735,49 @@ async def restore_snapshot(
     """
     Restore one SmartPanel from a validated snapshot.
 
-    This function performs all active SmartPanel modifications.
+    The connected panel identity is verified before any modification.
     """
 
-    panel_name = snapshot["panelName"]
-    panel_ip = snapshot["panelIp"]
-    panel_id = snapshot["panelId"]
+    panel_name = snapshot[
+        "panelName"
+    ]
 
-    desired_listen = snapshot["listenKeys"]
-    desired_call = snapshot["callKeys"]
+    panel_ip = snapshot[
+        "panelIp"
+    ]
 
-    uri = f"ws://{panel_ip}/live-view"
+    panel_id = snapshot[
+        "panelId"
+    ]
+
+    desired_listen = snapshot[
+        "listenKeys"
+    ]
+
+    desired_call = snapshot[
+        "callKeys"
+    ]
+
+    uri = (
+        f"ws://{panel_ip}/live-view"
+    )
 
     print()
-    print("====================================")
-    print(f"Panel    : {panel_name}")
-    print(f"IP       : {panel_ip}")
-    print(f"Panel ID : {panel_id}")
-    print("====================================")
+    print(
+        "===================================="
+    )
+    print(
+        f"Panel    : {panel_name}"
+    )
+    print(
+        f"IP       : {panel_ip}"
+    )
+    print(
+        f"Panel ID : {panel_id}"
+    )
+    print(
+        "===================================="
+    )
 
     print()
     print(
@@ -778,12 +790,11 @@ async def restore_snapshot(
     ) as ws:
 
         # -------------------------------------------------------------------
-        # Safety check:
-        # Verify the connected SmartPanel before changing anything.
+        # Safety check: verify panel identity before changing anything.
         # -------------------------------------------------------------------
 
-        connected_name = await get_panel_name(
-            ws
+        connected_name = (
+            await get_panel_name(ws)
         )
 
         print(
@@ -791,7 +802,10 @@ async def restore_snapshot(
             f"{connected_name}"
         )
 
-        if connected_name != panel_name:
+        if (
+            connected_name
+            != panel_name
+        ):
 
             raise RuntimeError(
                 "SmartPanel identity mismatch. "
@@ -825,7 +839,7 @@ async def restore_snapshot(
             )
 
         # -------------------------------------------------------------------
-        # Read current SmartPanel state
+        # Read current state
         # -------------------------------------------------------------------
 
         start = time.monotonic()
@@ -847,7 +861,7 @@ async def restore_snapshot(
         )
 
         # -------------------------------------------------------------------
-        # Calculate initial drift
+        # Initial drift
         # -------------------------------------------------------------------
 
         drift = calculate_drift(
@@ -858,21 +872,21 @@ async def restore_snapshot(
         )
 
         print_drift_report(
-            drift,
-            title="Drift Analysis",
+            drift
         )
 
         removed_listen = 0
         removed_call = 0
-
         added_listen = 0
         added_call = 0
 
         # -------------------------------------------------------------------
-        # Remove states that are not present in the saved snapshot.
+        # Remove unexpected states
         # -------------------------------------------------------------------
 
-        for key in drift["extra_listen"]:
+        for key in drift[
+            "extra_listen"
+        ]:
 
             print(
                 f"Removing LISTEN {key}"
@@ -886,7 +900,9 @@ async def restore_snapshot(
 
             removed_listen += 1
 
-        for key in drift["extra_call"]:
+        for key in drift[
+            "extra_call"
+        ]:
 
             print(
                 f"Removing CALL {key}"
@@ -901,10 +917,12 @@ async def restore_snapshot(
             removed_call += 1
 
         # -------------------------------------------------------------------
-        # Restore states missing from the current SmartPanel.
+        # Restore missing states
         # -------------------------------------------------------------------
 
-        for key in drift["missing_listen"]:
+        for key in drift[
+            "missing_listen"
+        ]:
 
             print(
                 f"Restoring LISTEN {key}"
@@ -918,7 +936,9 @@ async def restore_snapshot(
 
             added_listen += 1
 
-        for key in drift["missing_call"]:
+        for key in drift[
+            "missing_call"
+        ]:
 
             print(
                 f"Restoring CALL {key}"
@@ -933,7 +953,7 @@ async def restore_snapshot(
             added_call += 1
 
         # -------------------------------------------------------------------
-        # Verify the resulting SmartPanel state.
+        # Verify resulting state
         # -------------------------------------------------------------------
 
         print()
@@ -947,7 +967,7 @@ async def restore_snapshot(
         )
 
     # -----------------------------------------------------------------------
-    # Calculate final compliance
+    # Final compliance
     # -----------------------------------------------------------------------
 
     final_drift = calculate_drift(
@@ -957,30 +977,27 @@ async def restore_snapshot(
         final["callKeys"],
     )
 
-    # -----------------------------------------------------------------------
-    # Final report
-    # -----------------------------------------------------------------------
-
     print()
-    print("====================================")
+    print(
+        "===================================="
+    )
 
     print(
         f"Removed Listen : {removed_listen}"
     )
-
     print(
         f"Removed Call   : {removed_call}"
     )
-
     print(
         f"Added Listen   : {added_listen}"
     )
-
     print(
         f"Added Call     : {added_call}"
     )
 
-    print("------------------------------------")
+    print(
+        "------------------------------------"
+    )
 
     print(
         f"Compliance     : "
@@ -994,40 +1011,38 @@ async def restore_snapshot(
     )
 
     print(
-        f"Status         : "
-        f"{final_status}"
+        f"Status         : {final_status}"
     )
 
-    print("------------------------------------")
+    print(
+        "------------------------------------"
+    )
 
     print(
         f"Missing Listen : "
         f"{final_drift['missing_listen']}"
     )
-
     print(
         f"Extra Listen   : "
         f"{final_drift['extra_listen']}"
     )
-
     print(
         f"Missing Call   : "
         f"{final_drift['missing_call']}"
     )
-
     print(
         f"Extra Call     : "
         f"{final_drift['extra_call']}"
     )
 
-    if final_drift["compliant"]:
+    print()
 
-        print()
+    if final_drift[
+        "compliant"
+    ]:
         print("SUCCESS ✅")
 
     else:
-
-        print()
         print("WARNING ⚠️")
 
     print(
@@ -1071,10 +1086,7 @@ async def main():
 
     args = parser.parse_args()
 
-    # -----------------------------------------------------------------------
-    # Load and validate the snapshot before making any network connection.
-    # -----------------------------------------------------------------------
-
+    # Load and validate before making any network connection.
     try:
 
         snapshot = load_snapshot(
@@ -1095,10 +1107,7 @@ async def main():
 
         return
 
-    # -----------------------------------------------------------------------
     # Perform restore with controlled error handling.
-    # -----------------------------------------------------------------------
-
     try:
 
         await restore_snapshot(

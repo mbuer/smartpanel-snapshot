@@ -34,31 +34,10 @@ Compliance model:
 
         NON-COMPLIANT
             At least one missing or extra state exists.
-
-Example:
-
-    Expected Listen : [6, 16, 18]
-    Current Listen  : [6, 16, 17, 20]
-
-    Correct expected states : 2 of 3
-    Compliance              : 66.7%
-    Status                  : NON-COMPLIANT
-
-Generated files:
-
-    metrics/<SmartPanel-name>.json
-
-The result is also appended as one JSON object per line to:
-
-    /var/log/smartpanel/panel-health.jsonl
-
-That JSONL file is intended to be consumed by Grafana Alloy and forwarded
-to Loki/Grafana.
 """
 
 import asyncio
 import json
-import os
 import re
 import sys
 from datetime import datetime, UTC
@@ -66,25 +45,24 @@ from pathlib import Path
 
 import websockets
 
+from config import CONFIG, PROJECT_DIR
+
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Configuration loaded from config.yaml
 # ---------------------------------------------------------------------------
 
-# Maximum time allowed to establish the SmartPanel WebSocket connection.
-CONNECT_TIMEOUT = 3
+CONNECT_TIMEOUT = CONFIG["smartpanels"]["connect_timeout"]
+RESPONSE_TIMEOUT = CONFIG["smartpanels"]["response_timeout"]
 
-# Maximum time allowed while waiting for a SmartPanel response.
-RESPONSE_TIMEOUT = 3
+METRICS_DIR = (
+    PROJECT_DIR
+    / CONFIG["paths"]["metrics"]
+)
 
-# Directory used for generated comparison metrics.
-METRICS_DIR = "metrics"
-
-# Runtime JSONL file consumed by Grafana Alloy.
-#
-# NOTE:
-# The user running compare.py must have permission to write to this path.
-ALLOY_LOG_FILE = "/var/log/smartpanel/panel-health.jsonl"
+ALLOY_LOG_FILE = Path(
+    CONFIG["logging"]["alloy_log"]
+)
 
 
 # ---------------------------------------------------------------------------
@@ -94,31 +72,6 @@ ALLOY_LOG_FILE = "/var/log/smartpanel/panel-health.jsonl"
 def load_snapshot(snapshot_path):
     """
     Load and validate a SmartPanel snapshot file.
-
-    Required fields:
-
-        panelName
-        panelIp
-        panelId
-        listenKeys
-        callKeys
-
-    Args:
-        snapshot_path:
-            Path to the snapshot JSON file.
-
-    Returns:
-        Validated snapshot dictionary.
-
-    Raises:
-        FileNotFoundError:
-            Snapshot does not exist.
-
-        ValueError:
-            Snapshot structure is invalid.
-
-        json.JSONDecodeError:
-            Snapshot does not contain valid JSON.
     """
 
     path = Path(snapshot_path)
@@ -201,24 +154,7 @@ async def receive_topic(
     """
     Wait for a specific SmartPanel Live View response topic.
 
-    SmartPanel Live View can send unrelated messages while a request is
-    being processed. Those messages are ignored.
-
-    A timeout prevents compare.py from waiting indefinitely.
-
-    Args:
-        ws:
-            Active WebSocket connection.
-
-        expected_topic:
-            Live View topic expected from the SmartPanel.
-
-    Returns:
-        Parsed JSON response.
-
-    Raises:
-        TimeoutError:
-            Expected response was not received in time.
+    Unrelated or malformed messages are ignored.
     """
 
     while True:
@@ -228,7 +164,6 @@ async def receive_topic(
             timeout=RESPONSE_TIMEOUT,
         )
 
-        # Binary messages are currently not relevant to state comparison.
         if isinstance(raw, bytes):
             continue
 
@@ -247,22 +182,25 @@ async def receive_topic(
 async def get_panel_name(ws):
     """
     Retrieve the SmartPanel custom name through Live View.
-
-    Returns:
-        SmartPanel customName string.
     """
 
-    await ws.send(json.dumps({
-        "topic": "/LiveView/FetchPanelInfo",
-        "body": {}
-    }))
+    await ws.send(
+        json.dumps({
+            "topic": "/LiveView/FetchPanelInfo",
+            "body": {},
+        })
+    )
 
     message = await receive_topic(
         ws,
         "/LiveView/FetchPanelInfoResponse",
     )
 
-    panels = message["body"]["panels"]
+    panels = message[
+        "body"
+    ][
+        "panels"
+    ]
 
     if not panels:
         raise ValueError(
@@ -278,33 +216,17 @@ async def fetch_current_state(
     panel_id,
 ):
     """
-    Retrieve current Listen and Call/Talk state from a SmartPanel.
-
-    Current Live View interpretation:
-
-        upperColor.green == 255
-            Listen is active.
-
-        lowerColor.red == 255
-            Call/Talk is active.
-
-    Args:
-        ws:
-            Active SmartPanel WebSocket connection.
-
-        panel_id:
-            SmartPanel panel ID stored in the snapshot.
-
-    Returns:
-        Dictionary containing sorted listenKeys and callKeys.
+    Retrieve current Listen and Call/Talk state.
     """
 
-    await ws.send(json.dumps({
-        "topic": "/LiveView/FetchPanelState",
-        "body": {
-            "panelId": panel_id
-        }
-    }))
+    await ws.send(
+        json.dumps({
+            "topic": "/LiveView/FetchPanelState",
+            "body": {
+                "panelId": panel_id,
+            },
+        })
+    )
 
     message = await receive_topic(
         ws,
@@ -315,7 +237,11 @@ async def fetch_current_state(
     call_keys = []
 
     for key in (
-        message["body"]["leverKeysLedRing"]
+        message[
+            "body"
+        ][
+            "leverKeysLedRing"
+        ]
     ):
 
         key_id = key["keyId"]
@@ -363,16 +289,7 @@ def calculate_drift(
 
     Compliance percentage measures how many expected states are correct.
 
-    Strict compliance requires:
-
-        - no missing Listen keys
-        - no extra Listen keys
-        - no missing Call keys
-        - no extra Call keys
-
-    Returns:
-        Dictionary containing drift lists, compliance percentage,
-        and a strict compliant Boolean.
+    Strict compliance requires no missing or extra states.
     """
 
     desired_listen = set(
@@ -390,10 +307,6 @@ def calculate_drift(
     current_call = set(
         current_call
     )
-
-    # -----------------------------------------------------------------------
-    # Determine configuration drift
-    # -----------------------------------------------------------------------
 
     missing_listen = sorted(
         desired_listen
@@ -415,10 +328,6 @@ def calculate_drift(
         - desired_call
     )
 
-    # -----------------------------------------------------------------------
-    # Compliance score
-    # -----------------------------------------------------------------------
-
     expected_total = (
         len(desired_listen)
         + len(desired_call)
@@ -426,8 +335,6 @@ def calculate_drift(
 
     if expected_total == 0:
 
-        # If the expected state is completely empty, the panel is
-        # 100% correct only when the current state is also empty.
         if (
             current_listen
             or current_call
@@ -464,10 +371,6 @@ def calculate_drift(
             1,
         )
 
-    # -----------------------------------------------------------------------
-    # Strict compliance state
-    # -----------------------------------------------------------------------
-
     compliant = not any([
         missing_listen,
         extra_listen,
@@ -499,17 +402,12 @@ def calculate_drift(
 
 def keys_to_string(keys):
     """
-    Convert a list/set of key IDs into a human-readable string.
+    Convert key IDs into a compact human-readable string.
 
     Example:
+        [6, 16, 18] -> "6,16,18"
 
-        [6, 16, 18]
-
-    becomes:
-
-        "6,16,18"
-
-    An empty collection becomes "-".
+    Empty collections become "-".
     """
 
     return (
@@ -528,8 +426,8 @@ def safe_filename(name):
     Convert a SmartPanel custom name into a filesystem-safe filename.
 
     NOTE:
-    As with snapshots, SmartPanel custom names are currently expected
-    to be unique. Duplicate names will produce metrics file collisions.
+    SmartPanel names are currently expected to be unique.
+    Duplicate names will result in metrics file collisions.
     """
 
     name = name.strip()
@@ -564,16 +462,8 @@ def build_result(
     """
     Build the structured comparison result.
 
-    This structure is written both to:
-
-        metrics/<panel>.json
-
-    and:
-
-        /var/log/smartpanel/panel-health.jsonl
-
-    Field naming intentionally remains compatible with the existing
-    Grafana/Alloy integration where possible.
+    Field names intentionally remain compatible with the existing
+    Alloy/Grafana integration.
     """
 
     expected_listen = set(
@@ -592,11 +482,6 @@ def build_result(
         current["callKeys"]
     )
 
-    # Keep the existing "healthy" field for compatibility with
-    # current dashboards/integrations.
-    #
-    # "compliant" is also included because it better describes what
-    # the value represents.
     healthy = drift["compliant"]
 
     status = (
@@ -606,11 +491,6 @@ def build_result(
     )
 
     return {
-
-        # -------------------------------------------------------------------
-        # Identity / timestamp
-        # -------------------------------------------------------------------
-
         "timestamp": datetime.now(
             UTC
         ).isoformat(),
@@ -626,10 +506,6 @@ def build_result(
         "panelId": snapshot[
             "panelId"
         ],
-
-        # -------------------------------------------------------------------
-        # Raw state data
-        # -------------------------------------------------------------------
 
         "expectedListen": sorted(
             expected_listen
@@ -647,10 +523,6 @@ def build_result(
             current_call
         ),
 
-        # -------------------------------------------------------------------
-        # Configuration drift
-        # -------------------------------------------------------------------
-
         "missingListen": drift[
             "missing_listen"
         ],
@@ -666,10 +538,6 @@ def build_result(
         "extraCall": drift[
             "extra_call"
         ],
-
-        # -------------------------------------------------------------------
-        # Human-readable representations
-        # -------------------------------------------------------------------
 
         "savedListenString":
             keys_to_string(
@@ -690,10 +558,6 @@ def build_result(
             keys_to_string(
                 current_call
             ),
-
-        # -------------------------------------------------------------------
-        # Counts
-        # -------------------------------------------------------------------
 
         "totalListen": len(
             current_listen
@@ -723,18 +587,14 @@ def build_result(
             "total_differences"
         ],
 
-        # -------------------------------------------------------------------
-        # Compliance / status
-        # -------------------------------------------------------------------
-
         "compliance": drift[
             "compliance"
         ],
 
-        # Existing field retained for Grafana compatibility.
+        # Existing compatibility field.
         "healthy": healthy,
 
-        # New, clearer fields for future consumers.
+        # Clearer fields for future consumers.
         "compliant": drift[
             "compliant"
         ],
@@ -745,13 +605,11 @@ def build_result(
 
 def write_metrics(result):
     """
-    Write the latest comparison result to the local metrics directory.
-
-    One file is maintained per SmartPanel.
+    Write the latest comparison result to the configured metrics directory.
     """
 
-    os.makedirs(
-        METRICS_DIR,
+    METRICS_DIR.mkdir(
+        parents=True,
         exist_ok=True,
     )
 
@@ -759,13 +617,12 @@ def write_metrics(result):
         result["panelName"]
     )
 
-    metrics_file = os.path.join(
-        METRICS_DIR,
-        f"{panel_name}.json",
+    metrics_file = (
+        METRICS_DIR
+        / f"{panel_name}.json"
     )
 
-    with open(
-        metrics_file,
+    with metrics_file.open(
         "w",
         encoding="utf-8",
     ) as file:
@@ -781,25 +638,15 @@ def write_metrics(result):
 
 def write_alloy_log(result):
     """
-    Append one comparison result to the Alloy/Loki JSONL feed.
-
-    Each line contains one complete JSON object.
-
-    The parent log directory must already exist and the current user
-    must have write permissions.
+    Append one comparison result to the configured Alloy/Loki JSONL feed.
     """
 
-    log_path = Path(
-        ALLOY_LOG_FILE
-    )
-
-    # Ensure the runtime directory exists where permissions allow it.
-    log_path.parent.mkdir(
+    ALLOY_LOG_FILE.parent.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    with log_path.open(
+    with ALLOY_LOG_FILE.open(
         "a",
         encoding="utf-8",
     ) as file:
@@ -819,8 +666,7 @@ async def compare_snapshot(snapshot):
     """
     Compare one SmartPanel against its saved snapshot.
 
-    The connected SmartPanel name is verified before comparison so an
-    IP reassignment cannot silently compare the wrong device.
+    The connected SmartPanel name is verified before comparison.
     """
 
     panel_name = snapshot[
@@ -849,26 +695,19 @@ async def compare_snapshot(snapshot):
         open_timeout=CONNECT_TIMEOUT,
     ) as ws:
 
-        # -------------------------------------------------------------------
-        # Verify panel identity
-        # -------------------------------------------------------------------
-
         connected_name = (
             await get_panel_name(ws)
         )
 
-        if connected_name != panel_name:
-
+        if (
+            connected_name
+            != panel_name
+        ):
             raise RuntimeError(
                 "SmartPanel identity mismatch. "
                 f"Snapshot expects '{panel_name}', "
-                f"but device reports "
-                f"'{connected_name}'."
+                f"but device reports '{connected_name}'."
             )
-
-        # -------------------------------------------------------------------
-        # Retrieve current panel state
-        # -------------------------------------------------------------------
 
         current = (
             await fetch_current_state(
@@ -896,8 +735,8 @@ async def compare_snapshot(snapshot):
 
 async def main():
     """
-    Load a snapshot, compare it to the live SmartPanel, and generate
-    metrics/log output.
+    Load a snapshot, compare it against the live SmartPanel,
+    and generate metrics/log output.
     """
 
     if len(sys.argv) != 2:
@@ -924,10 +763,6 @@ async def main():
 
     snapshot_file = sys.argv[1]
 
-    # -----------------------------------------------------------------------
-    # Load snapshot before making a network connection.
-    # -----------------------------------------------------------------------
-
     try:
 
         snapshot = load_snapshot(
@@ -947,10 +782,6 @@ async def main():
         print()
 
         return
-
-    # -----------------------------------------------------------------------
-    # Perform live comparison.
-    # -----------------------------------------------------------------------
 
     try:
 
@@ -992,17 +823,12 @@ async def main():
 
         return
 
-    # -----------------------------------------------------------------------
-    # Build result
-    # -----------------------------------------------------------------------
-
     result = build_result(
         snapshot,
         current,
         drift,
     )
 
-    # Print complete structured result to stdout.
     print()
     print(
         json.dumps(
@@ -1012,13 +838,15 @@ async def main():
     )
 
     # -----------------------------------------------------------------------
-    # Write local metrics file.
+    # Write local metrics file
     # -----------------------------------------------------------------------
 
     try:
 
         metrics_file = (
-            write_metrics(result)
+            write_metrics(
+                result
+            )
         )
 
         print()
@@ -1036,7 +864,7 @@ async def main():
         )
 
     # -----------------------------------------------------------------------
-    # Append Alloy / Loki feed.
+    # Append Alloy / Loki feed
     # -----------------------------------------------------------------------
 
     try:
@@ -1052,8 +880,7 @@ async def main():
 
     except OSError as exc:
 
-        # A logging permission problem should not invalidate the actual
-        # SmartPanel comparison.
+        # Logging failure should not invalidate the actual comparison.
         print()
         print(
             "WARNING: Comparison succeeded, "
