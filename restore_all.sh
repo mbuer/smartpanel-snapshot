@@ -10,6 +10,8 @@ fi
 
 cd "$(dirname "$0")"
 
+mkdir -p logs
+
 echo
 echo "Restoring SmartPanels in parallel..."
 echo "Normalization: ${NORMALIZE:-disabled}"
