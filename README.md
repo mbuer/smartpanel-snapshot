@@ -107,7 +107,7 @@ Example:
 ```yaml
 smartpanels:
   network: "10.85.226.64/26"
-  scan_concurrency: 20
+  scan_concurrency: 50
   connect_timeout: 3
   response_timeout: 3
 
