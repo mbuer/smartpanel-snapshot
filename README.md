@@ -183,6 +183,8 @@ and, when configured:
 
 The restore process verifies panel identity, determines drift, corrects unexpected/missing states, reads the panel again, and verifies final compliance.
 
+After all restores complete successfully, \`restore_all.sh\` automatically runs a final \`check_all.sh\`. This independently verifies the restored fleet and publishes the latest compliance state to the metrics/JSONL → Alloy → Loki → Grafana pipeline, ensuring the Grafana dashboard immediately reflects the restored state.
+
 ## Core Commands
 
 | Task | All saved panels | Individual panel |

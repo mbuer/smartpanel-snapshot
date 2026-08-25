@@ -2,13 +2,22 @@
 
 set -e
 
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON="$PROJECT_DIR/.venv/bin/python"
+
+if [ ! -x "$PYTHON" ]; then
+    echo "ERROR: Python virtual environment not found:"
+    echo "$PYTHON"
+    exit 1
+fi
+
 NORMALIZE=""
 
 if [[ "$1" == "--normalize" ]]; then
     NORMALIZE="--normalize"
 fi
 
-cd "$(dirname "$0")"
+cd "$PROJECT_DIR"
 
 mkdir -p logs
 
@@ -27,7 +36,7 @@ for snapshot in snapshots/*.json; do
 
     echo "[START] $name"
 
-    python restore.py "$snapshot" $NORMALIZE \
+    "$PYTHON" "$PROJECT_DIR/restore.py" "$snapshot" $NORMALIZE \
         > "logs/restore-${name}.log" 2>&1 &
 
     pids+=("$!")
@@ -56,6 +65,17 @@ echo
 
 if [[ "$failed" -eq 0 ]]; then
     echo "Restore-all complete."
+    echo
+    echo "Running final compliance check..."
+
+    if "$PROJECT_DIR/check_all.sh"; then
+        echo
+        echo "Final compliance check complete."
+    else
+        echo
+        echo "WARNING: Restore completed, but final compliance check failed."
+        exit 1
+    fi
 else
     echo "Restore-all completed with failures."
     exit 1
