@@ -1,0 +1,41 @@
+logging {
+  level = "info"
+}
+
+local.file_match "smartpanel" {
+  path_targets = [
+    {
+      "__path__" = "/var/log/smartpanel/panel-health.jsonl",
+      "job"      = "smartpanel",
+    },
+  ]
+}
+
+loki.source.file "smartpanel" {
+  targets    = local.file_match.smartpanel.targets
+  forward_to = [loki.process.smartpanel.receiver]
+}
+
+loki.process "smartpanel" {
+  stage.json {
+    expressions = {
+      panelName = "panelName",
+      status    = "status",
+    }
+  }
+
+  stage.labels {
+    values = {
+      panel  = "panelName",
+      status = "status",
+    }
+  }
+
+  forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://127.0.0.1:3100/loki/api/v1/push"
+  }
+}

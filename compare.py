@@ -182,33 +182,47 @@ async def receive_topic(
 async def get_panel_name(ws):
     """
     Retrieve the SmartPanel custom name through Live View.
+
+    Some SmartPanels may occasionally return an incomplete
+    FetchPanelInfoResponse. Retry before treating this as a failure.
     """
 
-    await ws.send(
-        json.dumps({
-            "topic": "/LiveView/FetchPanelInfo",
-            "body": {},
-        })
-    )
+    attempts = 3
 
-    message = await receive_topic(
-        ws,
-        "/LiveView/FetchPanelInfoResponse",
-    )
+    for attempt in range(1, attempts + 1):
 
-    panels = message[
-        "body"
-    ][
-        "panels"
-    ]
-
-    if not panels:
-        raise ValueError(
-            "SmartPanel returned an empty "
-            "panel information response."
+        await ws.send(
+            json.dumps({
+                "topic": "/LiveView/FetchPanelInfo",
+                "body": {},
+            })
         )
 
-    return panels[0]["customName"]
+        message = await receive_topic(
+            ws,
+            "/LiveView/FetchPanelInfoResponse",
+        )
+
+        panels = (
+            message
+            .get("body", {})
+            .get("panels")
+        )
+
+        if panels:
+            return panels[0]["customName"]
+
+        if attempt < attempts:
+            print(
+                f"WARNING: Incomplete panel info response "
+                f"(attempt {attempt}/{attempts}); retrying..."
+            )
+            await asyncio.sleep(0.25)
+
+    raise ValueError(
+        "SmartPanel returned incomplete panel information "
+        "after 3 attempts."
+    )
 
 
 async def fetch_current_state(
@@ -821,7 +835,7 @@ async def main():
         )
         print()
 
-        return
+        raise SystemExit(1)
 
     result = build_result(
         snapshot,
