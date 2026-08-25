@@ -153,6 +153,8 @@ This discovers compatible SmartPanels in the configured subnet and stores snapsh
 snapshots/
 ```
 
+After saving completes successfully, `save_all.sh` automatically runs `check_all.sh`. This verifies the newly saved baseline and publishes the latest panel state through the metrics/JSONL → Alloy → Loki → Grafana pipeline.
+
 SmartPanel custom names should be unique because the custom name is used as the snapshot filename.
 
 ### 4. Check the live system
@@ -212,6 +214,8 @@ A comparison reports:
 - total differences
 - compliance percentage
 - `COMPLIANT` / `NON-COMPLIANT`
+
+Compliance measures the overlap between the saved and current state. Both missing and unexpected states reduce the percentage. An exact match is `100%`; any configuration drift reduces compliance.
 
 Other SmartPanel modes may represent state through different Live View fields and are not yet fully covered.
 
