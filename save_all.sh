@@ -18,6 +18,23 @@ if [ ! -x "$PYTHON" ]; then
     exit 1
 fi
 
-"$PYTHON" "$PROJECT_DIR/save.py"
+if "$PYTHON" "$PROJECT_DIR/save.py"; then
+    echo
+    echo "Save-all complete."
+    echo
+    echo "Running final compliance check..."
 
-exit $?
+    if "$PROJECT_DIR/check_all.sh"; then
+        echo
+        echo "Final compliance check complete."
+        exit 0
+    else
+        echo
+        echo "WARNING: Save completed, but final compliance check failed."
+        exit 1
+    fi
+else
+    echo
+    echo "Save-all failed."
+    exit 1
+fi

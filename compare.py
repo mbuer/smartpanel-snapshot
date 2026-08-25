@@ -301,7 +301,7 @@ def calculate_drift(
     """
     Compare saved SmartPanel state with current SmartPanel state.
 
-    Compliance percentage measures how many expected states are correct.
+    Compliance percentage measures the overlap between the saved and current state. Missing and unexpected states both reduce compliance.
 
     Strict compliance requires no missing or extra states.
     """
@@ -342,21 +342,21 @@ def calculate_drift(
         - desired_call
     )
 
-    expected_total = (
-        len(desired_listen)
-        + len(desired_call)
+    all_listen = desired_listen.union(
+        current_listen
     )
 
-    if expected_total == 0:
+    all_call = desired_call.union(
+        current_call
+    )
 
-        if (
-            current_listen
-            or current_call
-        ):
-            compliance = 0.0
+    total_states = (
+        len(all_listen)
+        + len(all_call)
+    )
 
-        else:
-            compliance = 100.0
+    if total_states == 0:
+        compliance = 100.0
 
     else:
 
@@ -380,7 +380,7 @@ def calculate_drift(
         compliance = round(
             (
                 correct_total
-                / expected_total
+                / total_states
             ) * 100,
             1,
         )
